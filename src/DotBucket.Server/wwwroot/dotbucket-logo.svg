@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Gradients -->
+    <linearGradient id="boxGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4f46e5" /> <!-- Indigo 600 -->
+      <stop offset="100%" stop-color="#312e81" /> <!-- Indigo 900 -->
+    </linearGradient>
+    <linearGradient id="boxGrad2" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#6366f1" /> <!-- Indigo 500 -->
+      <stop offset="100%" stop-color="#4338ca" /> <!-- Indigo 700 -->
+    </linearGradient>
+    <linearGradient id="dotGradHigh" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#06b6d4" /> <!-- Cyan 500 -->
+      <stop offset="100%" stop-color="#3b82f6" /> <!-- Blue 500 -->
+    </linearGradient>
+    <linearGradient id="dotGradMid" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#22d3ee" /> <!-- Cyan 400 -->
+      <stop offset="100%" stop-color="#0ea5e9" /> <!-- Sky 500 -->
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Isometric Box/Bucket Container -->
+  <!-- Left face -->
+  <path d="M 256 460 L 116 380 L 116 220 L 256 300 Z" fill="url(#boxGrad1)" />
+  <!-- Right face -->
+  <path d="M 256 460 L 396 380 L 396 220 L 256 300 Z" fill="url(#boxGrad2)" />
+  <!-- Inside Back Left -->
+  <path d="M 116 220 L 256 140 L 256 300 Z" fill="#1e1b4b" opacity="0.5" />
+  <!-- Inside Back Right -->
+  <path d="M 396 220 L 256 140 L 256 300 Z" fill="#1e1b4b" opacity="0.8" />
+  
+  <!-- "Dots" representing data objects falling into the bucket -->
+  <!-- Top floating dot -->
+  <circle cx="256" cy="110" r="32" fill="url(#dotGradHigh)" filter="url(#glow)" />
+  <!-- Left floating dot -->
+  <circle cx="180" cy="170" r="20" fill="url(#dotGradMid)" filter="url(#glow)" />
+  <!-- Right floating dot -->
+  <circle cx="330" cy="150" r="24" fill="url(#dotGradMid)" filter="url(#glow)" />
+  
+  <!-- Large dot settled inside the isometric container -->
+  <circle cx="256" cy="260" r="40" fill="url(#dotGradHigh)" filter="url(#glow)" opacity="0.95" />
+
+  <!-- Reflections/Highlights on Dots for a 3D spherical look -->
+  <circle cx="246" cy="96" r="8" fill="#ffffff" opacity="0.8" />
+  <circle cx="174" cy="164" r="5" fill="#ffffff" opacity="0.8" />
+  <circle cx="322" cy="142" r="6" fill="#ffffff" opacity="0.8" />
+  <circle cx="244" cy="244" r="10" fill="#ffffff" opacity="0.8" />
+
+</svg>

@@ -1,0 +1,19 @@
+# Node/Frontend
+node_modules/
+dist/
+.env
+
+# .NET/Backend
+bin/
+obj/
+*.user
+.idea/
+.vscode/
+
+# Storage
+storage/
+/data
+
+# Docker
+.dockerignore
+Dockerfile

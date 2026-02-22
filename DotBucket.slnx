@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DotBucket.Server/DotBucket.Server.csproj" />
+    <Folder Name="DotBucket.UI">
+      <File Path="src/DotBucket.UI/package.json" />
+      <File Path="src/DotBucket.UI/README.md" />
+    </Folder>
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DotBucket.Server.Tests/DotBucket.Server.Tests.csproj" />
+    <Project Path="tests/DotBucket.Server.IntegrationTests/DotBucket.Server.IntegrationTests.csproj" />
+  </Folder>
+</Solution>

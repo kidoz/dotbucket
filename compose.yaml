@@ -1,0 +1,114 @@
+services:
+  dotbucket-1:
+    build: .
+    container_name: dotbucket-1
+    ports:
+      - "9001:9000" # S3 API & Dashboard
+    volumes:
+      - dotbucket-data-1:/data
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - Auth__AdminToken=my-admin-token
+      - Auth__RootAccessKey=admin
+      - Auth__RootSecretKey=admin123
+      - Cluster__Enabled=true
+      - Cluster__NodeId=node-1
+      - Cluster__AdvertiseAddress=http://dotbucket-1:9000
+      - Cluster__LeaderNodeId=node-1
+      - Cluster__ClusterToken=my-secure-cluster-token
+      - Cluster__ReplicationFactor=3
+      - Cluster__WriteQuorum=2
+      - Cluster__ReadQuorum=1
+      - "Cluster__Nodes__0__NodeId=node-1"
+      - "Cluster__Nodes__0__Address=http://dotbucket-1:9000"
+      - "Cluster__Nodes__1__NodeId=node-2"
+      - "Cluster__Nodes__1__Address=http://dotbucket-2:9000"
+      - "Cluster__Nodes__2__NodeId=node-3"
+      - "Cluster__Nodes__2__Address=http://dotbucket-3:9000"
+      - Storage__MasterKey=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=
+    networks:
+      - dotbucket-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  dotbucket-2:
+    build: .
+    container_name: dotbucket-2
+    ports:
+      - "9002:9000"
+    volumes:
+      - dotbucket-data-2:/data
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - Auth__AdminToken=my-admin-token
+      - Auth__RootAccessKey=admin
+      - Auth__RootSecretKey=admin123
+      - Cluster__Enabled=true
+      - Cluster__NodeId=node-2
+      - Cluster__AdvertiseAddress=http://dotbucket-2:9000
+      - Cluster__LeaderNodeId=node-1
+      - Cluster__ClusterToken=my-secure-cluster-token
+      - Cluster__ReplicationFactor=3
+      - Cluster__WriteQuorum=2
+      - Cluster__ReadQuorum=1
+      - "Cluster__Nodes__0__NodeId=node-1"
+      - "Cluster__Nodes__0__Address=http://dotbucket-1:9000"
+      - "Cluster__Nodes__1__NodeId=node-2"
+      - "Cluster__Nodes__1__Address=http://dotbucket-2:9000"
+      - "Cluster__Nodes__2__NodeId=node-3"
+      - "Cluster__Nodes__2__Address=http://dotbucket-3:9000"
+      - Storage__MasterKey=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=
+    networks:
+      - dotbucket-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  dotbucket-3:
+    build: .
+    container_name: dotbucket-3
+    ports:
+      - "9003:9000"
+    volumes:
+      - dotbucket-data-3:/data
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - Auth__AdminToken=my-admin-token
+      - Auth__RootAccessKey=admin
+      - Auth__RootSecretKey=admin123
+      - Cluster__Enabled=true
+      - Cluster__NodeId=node-3
+      - Cluster__AdvertiseAddress=http://dotbucket-3:9000
+      - Cluster__LeaderNodeId=node-1
+      - Cluster__ClusterToken=my-secure-cluster-token
+      - Cluster__ReplicationFactor=3
+      - Cluster__WriteQuorum=2
+      - Cluster__ReadQuorum=1
+      - "Cluster__Nodes__0__NodeId=node-1"
+      - "Cluster__Nodes__0__Address=http://dotbucket-1:9000"
+      - "Cluster__Nodes__1__NodeId=node-2"
+      - "Cluster__Nodes__1__Address=http://dotbucket-2:9000"
+      - "Cluster__Nodes__2__NodeId=node-3"
+      - "Cluster__Nodes__2__Address=http://dotbucket-3:9000"
+      - Storage__MasterKey=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=
+    networks:
+      - dotbucket-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  dotbucket-net:
+    driver: bridge
+
+volumes:
+  dotbucket-data-1:
+  dotbucket-data-2:
+  dotbucket-data-3:

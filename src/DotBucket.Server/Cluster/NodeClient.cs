@@ -44,6 +44,15 @@ public class NodeClient(IHttpClientFactory httpClientFactory, IOptions<ClusterOp
         return client;
     }
 
+    /// <summary>
+    /// Encodes each segment of an object key for safe URL construction.
+    /// Preserves '/' as a path separator while encoding reserved characters within each segment.
+    /// </summary>
+    private static string EncodeKeySegments(string key)
+    {
+        return string.Join("/", key.Split('/').Select(Uri.EscapeDataString));
+    }
+
     public async Task<StorageObject?> PutObjectAsync(
         string nodeAddress,
         string bucket,
@@ -51,13 +60,15 @@ public class NodeClient(IHttpClientFactory httpClientFactory, IOptions<ClusterOp
         Stream content,
         string contentType,
         Dictionary<string, string>? metadata,
-        CancellationToken ct
+        CancellationToken ct,
+        string? versionId = null,
+        string? encryption = null
     )
     {
         using var client = CreateClient();
         using var request = new HttpRequestMessage(
             HttpMethod.Put,
-            $"{nodeAddress.TrimEnd('/')}/_internal/objects/{Uri.EscapeDataString(bucket)}/{key}"
+            $"{nodeAddress.TrimEnd('/')}/_internal/objects/{Uri.EscapeDataString(bucket)}/{EncodeKeySegments(key)}"
         );
 
         var streamContent = new StreamContent(content);
@@ -72,6 +83,16 @@ public class NodeClient(IHttpClientFactory httpClientFactory, IOptions<ClusterOp
             {
                 request.Headers.TryAddWithoutValidation($"X-DotBucket-Meta-{k}", v);
             }
+        }
+
+        if (versionId != null)
+        {
+            request.Headers.TryAddWithoutValidation("X-DotBucket-VersionId", versionId);
+        }
+
+        if (encryption != null)
+        {
+            request.Headers.TryAddWithoutValidation("X-DotBucket-Encryption", encryption);
         }
 
         var response = await client.SendAsync(request, ct);
@@ -92,7 +113,7 @@ public class NodeClient(IHttpClientFactory httpClientFactory, IOptions<ClusterOp
     {
         using var client = CreateClient();
         var url =
-            $"{nodeAddress.TrimEnd('/')}/_internal/objects/{Uri.EscapeDataString(bucket)}/{key}";
+            $"{nodeAddress.TrimEnd('/')}/_internal/objects/{Uri.EscapeDataString(bucket)}/{EncodeKeySegments(key)}";
         if (versionId != null)
             url += $"?versionId={Uri.EscapeDataString(versionId)}";
 
@@ -129,7 +150,7 @@ public class NodeClient(IHttpClientFactory httpClientFactory, IOptions<ClusterOp
     {
         using var client = CreateClient();
         var url =
-            $"{nodeAddress.TrimEnd('/')}/_internal/objects/{Uri.EscapeDataString(bucket)}/{key}";
+            $"{nodeAddress.TrimEnd('/')}/_internal/objects/{Uri.EscapeDataString(bucket)}/{EncodeKeySegments(key)}";
         if (versionId != null)
             url += $"?versionId={Uri.EscapeDataString(versionId)}";
 
@@ -164,7 +185,7 @@ public class NodeClient(IHttpClientFactory httpClientFactory, IOptions<ClusterOp
     {
         using var client = CreateClient();
         var url =
-            $"{nodeAddress.TrimEnd('/')}/_internal/objects/{Uri.EscapeDataString(bucket)}/{key}";
+            $"{nodeAddress.TrimEnd('/')}/_internal/objects/{Uri.EscapeDataString(bucket)}/{EncodeKeySegments(key)}";
         if (versionId != null)
             url += $"?versionId={Uri.EscapeDataString(versionId)}";
 
@@ -225,6 +246,78 @@ public class NodeClient(IHttpClientFactory httpClientFactory, IOptions<ClusterOp
             content,
             ct
         );
+        response.EnsureSuccessStatusCode();
+    }
+
+    public async Task SetObjectLockConfigAsync(
+        string nodeAddress,
+        string bucket,
+        ObjectLockConfig config,
+        CancellationToken ct
+    )
+    {
+        using var client = CreateClient();
+        var body = new InternalSetObjectLockConfigRequest(
+            config.Enabled,
+            config.DefaultRetentionMode,
+            config.DefaultRetentionDays
+        );
+        var content = JsonContent.Create(
+            body,
+            StorageObjectJsonContext.Default.InternalSetObjectLockConfigRequest
+        );
+        var response = await client.PostAsync(
+            $"{nodeAddress.TrimEnd('/')}/_internal/buckets/{Uri.EscapeDataString(bucket)}/object-lock",
+            content,
+            ct
+        );
+        response.EnsureSuccessStatusCode();
+    }
+
+    public async Task SetObjectRetentionAsync(
+        string nodeAddress,
+        string bucket,
+        string key,
+        string? versionId,
+        string mode,
+        DateTime retainUntil,
+        CancellationToken ct
+    )
+    {
+        using var client = CreateClient();
+        var body = new InternalSetObjectRetentionRequest(mode, retainUntil);
+        var content = JsonContent.Create(
+            body,
+            StorageObjectJsonContext.Default.InternalSetObjectRetentionRequest
+        );
+        var url =
+            $"{nodeAddress.TrimEnd('/')}/_internal/objects/{Uri.EscapeDataString(bucket)}/retention/{EncodeKeySegments(key)}";
+        if (versionId != null)
+            url += $"?versionId={Uri.EscapeDataString(versionId)}";
+        var response = await client.PostAsync(url, content, ct);
+        response.EnsureSuccessStatusCode();
+    }
+
+    public async Task SetObjectLegalHoldAsync(
+        string nodeAddress,
+        string bucket,
+        string key,
+        string? versionId,
+        bool hold,
+        CancellationToken ct
+    )
+    {
+        using var client = CreateClient();
+        var body = new InternalSetObjectLegalHoldRequest(hold);
+        var content = JsonContent.Create(
+            body,
+            StorageObjectJsonContext.Default.InternalSetObjectLegalHoldRequest
+        );
+        var url =
+            $"{nodeAddress.TrimEnd('/')}/_internal/objects/{Uri.EscapeDataString(bucket)}/legal-hold/{EncodeKeySegments(key)}";
+        if (versionId != null)
+            url += $"?versionId={Uri.EscapeDataString(versionId)}";
+        var response = await client.PostAsync(url, content, ct);
         response.EnsureSuccessStatusCode();
     }
 

@@ -103,6 +103,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)";
         migrationsTableCmd.ExecuteNonQuery();
 
+        // Squashed migration: complete schema (buckets, objects, multipart, IAM, encryption, object locking)
         RunMigration(
             connection,
             1,
@@ -110,7 +111,9 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                 CREATE TABLE IF NOT EXISTS buckets (
                     name TEXT PRIMARY KEY,
                     created_at TEXT NOT NULL,
-                    versioning INTEGER NOT NULL DEFAULT 0
+                    versioning INTEGER NOT NULL DEFAULT 0,
+                    object_lock_enabled INTEGER NOT NULL DEFAULT 0,
+                    object_lock_config_json TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS objects (
@@ -124,6 +127,10 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                     etag TEXT NOT NULL,
                     last_modified TEXT NOT NULL,
                     metadata_json TEXT,
+                    encryption TEXT,
+                    retention_mode TEXT,
+                    retain_until_date TEXT,
+                    legal_hold INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (bucket_name, object_key, version_id)
                 );
 
@@ -135,7 +142,8 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                     object_key TEXT NOT NULL,
                     content_type TEXT NOT NULL,
                     metadata_json TEXT,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    encryption TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS parts (
@@ -150,26 +158,14 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                     bucket_name TEXT PRIMARY KEY,
                     config_json TEXT NOT NULL
                 );
-            """
-        );
 
-        RunMigration(
-            connection,
-            2,
-            "ALTER TABLE buckets ADD COLUMN versioning INTEGER NOT NULL DEFAULT 0",
-            ignoreErrors: true
-        );
-
-        RunMigration(
-            connection,
-            3,
-            """
                 CREATE TABLE IF NOT EXISTS iam_users (
                     user_name TEXT PRIMARY KEY,
                     status TEXT NOT NULL DEFAULT 'enabled',
                     created_at TEXT NOT NULL,
                     updated_at TEXT
                 );
+
                 CREATE TABLE IF NOT EXISTS iam_access_keys (
                     access_key TEXT PRIMARY KEY,
                     secret_key TEXT NOT NULL,
@@ -178,12 +174,15 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (user_name) REFERENCES iam_users(user_name) ON DELETE CASCADE
                 );
+
                 CREATE INDEX IF NOT EXISTS idx_iam_access_keys_user ON iam_access_keys(user_name);
+
                 CREATE TABLE IF NOT EXISTS iam_groups (
                     group_name TEXT PRIMARY KEY,
                     status TEXT NOT NULL DEFAULT 'enabled',
                     created_at TEXT NOT NULL
                 );
+
                 CREATE TABLE IF NOT EXISTS iam_group_members (
                     group_name TEXT NOT NULL,
                     user_name TEXT NOT NULL,
@@ -191,6 +190,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                     FOREIGN KEY (group_name) REFERENCES iam_groups(group_name) ON DELETE CASCADE,
                     FOREIGN KEY (user_name) REFERENCES iam_users(user_name) ON DELETE CASCADE
                 );
+
                 CREATE TABLE IF NOT EXISTS iam_policies (
                     policy_name TEXT PRIMARY KEY,
                     policy_json TEXT NOT NULL,
@@ -198,6 +198,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                     created_at TEXT NOT NULL,
                     updated_at TEXT
                 );
+
                 CREATE TABLE IF NOT EXISTS iam_policy_attachments (
                     policy_name TEXT NOT NULL,
                     principal_type TEXT NOT NULL,
@@ -208,38 +209,13 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             """
         );
 
-        RunMigration(
-            connection,
-            4,
-            """
-                ALTER TABLE objects ADD COLUMN encryption TEXT;
-                ALTER TABLE multipart_uploads ADD COLUMN encryption TEXT;
-            """,
-            ignoreErrors: true
-        );
-
-        // Migration 5: Object Locking support
-        RunMigration(
-            connection,
-            5,
-            """
-                ALTER TABLE buckets ADD COLUMN object_lock_enabled INTEGER NOT NULL DEFAULT 0;
-                ALTER TABLE buckets ADD COLUMN object_lock_config_json TEXT;
-                ALTER TABLE objects ADD COLUMN retention_mode TEXT;
-                ALTER TABLE objects ADD COLUMN retain_until_date TEXT;
-                ALTER TABLE objects ADD COLUMN legal_hold INTEGER NOT NULL DEFAULT 0;
-            """,
-            ignoreErrors: true
-        );
-
         CleanupOrphanedTempFiles();
     }
 
     private static void RunMigration(
         SqliteConnection connection,
         int version,
-        string sql,
-        bool ignoreErrors = false
+        string sql
     )
     {
         using var checkCmd = connection.CreateCommand();
@@ -248,20 +224,21 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         if (checkCmd.ExecuteScalar() != null)
             return;
 
-        try
-        {
-            using var cmd = connection.CreateCommand();
-            cmd.CommandText = sql;
-            cmd.ExecuteNonQuery();
-        }
-        catch when (ignoreErrors) { }
+        using var transaction = connection.BeginTransaction();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.Transaction = transaction;
+        cmd.ExecuteNonQuery();
 
         using var recordCmd = connection.CreateCommand();
         recordCmd.CommandText =
-            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES ($v, $at)";
+            "INSERT INTO schema_migrations (version, applied_at) VALUES ($v, $at)";
         recordCmd.Parameters.AddWithValue("$v", version);
         recordCmd.Parameters.AddWithValue("$at", DateTime.UtcNow.ToString("O"));
+        recordCmd.Transaction = transaction;
         recordCmd.ExecuteNonQuery();
+
+        transaction.Commit();
     }
 
     private void CleanupOrphanedTempFiles()
@@ -512,7 +489,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             ) ?? new List<NotificationConfiguration>();
     }
 
-    public async Task<StorageObject> PutObjectAsync(
+    public Task<StorageObject> PutObjectAsync(
         string bucketName,
         string objectKey,
         Stream content,
@@ -520,6 +497,17 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         Dictionary<string, string>? metadata = null,
         string? encryption = null,
         CancellationToken cancellationToken = default
+    ) => PutObjectAsync(bucketName, objectKey, content, contentType, metadata, encryption, cancellationToken, replicaVersionId: null);
+
+    public async Task<StorageObject> PutObjectAsync(
+        string bucketName,
+        string objectKey,
+        Stream content,
+        string contentType,
+        Dictionary<string, string>? metadata,
+        string? encryption,
+        CancellationToken cancellationToken,
+        string? replicaVersionId
     )
     {
         var writeLock = GetWriteLock(bucketName, objectKey);
@@ -533,7 +521,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             var versionId = "null";
             if (bucket.Versioning == VersioningStatus.Enabled)
             {
-                versionId = Guid.NewGuid().ToString("N");
+                versionId = replicaVersionId ?? Guid.NewGuid().ToString("N");
             }
 
             var objectPath = GetObjectPath(bucketName, objectKey, versionId);

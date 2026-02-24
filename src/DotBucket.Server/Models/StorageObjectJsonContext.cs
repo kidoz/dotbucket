@@ -12,6 +12,12 @@ public record InternalCreateBucketRequest(string Name);
 
 public record InternalSetVersioningRequest(string Status);
 
+public record InternalSetObjectLockConfigRequest(bool Enabled, string? DefaultRetentionMode, int? DefaultRetentionDays);
+
+public record InternalSetObjectRetentionRequest(string Mode, DateTime RetainUntil);
+
+public record InternalSetObjectLegalHoldRequest(bool Hold);
+
 public record CreateBucketRequest(string Name);
 
 public record SetVersioningRequest(string Status);
@@ -45,6 +51,9 @@ public record AdminVersioningResponse(string Status);
 [JsonSerializable(typeof(ClusterState))]
 [JsonSerializable(typeof(InternalCreateBucketRequest))]
 [JsonSerializable(typeof(InternalSetVersioningRequest))]
+[JsonSerializable(typeof(InternalSetObjectLockConfigRequest))]
+[JsonSerializable(typeof(InternalSetObjectRetentionRequest))]
+[JsonSerializable(typeof(InternalSetObjectLegalHoldRequest))]
 [JsonSerializable(typeof(ClusterStatusResponse))]
 [JsonSerializable(typeof(ClusterNodeStatusResponse))]
 [JsonSerializable(typeof(List<ClusterNodeStatusResponse>))]

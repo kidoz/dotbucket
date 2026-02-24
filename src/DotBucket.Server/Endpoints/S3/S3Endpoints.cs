@@ -1,9 +1,11 @@
 // Licensed under the MIT License.
 // See LICENSE file in the project root for full license information.
 
+using System.Buffers;
 using System.Text;
 using System.Xml;
 using System.Xml.Linq;
+using DotBucket.Server.Middleware;
 using DotBucket.Server.Models;
 using DotBucket.Server.Storage;
 
@@ -26,10 +28,77 @@ public static class S3Endpoints
 
     private static bool IsReservedBucketName(string bucket) => ReservedPrefixes.Contains(bucket);
 
+    private static async Task<IResult> WriteInvalidSseHeaderAsync(HttpContext context)
+    {
+        await S3ErrorResponses.WriteErrorAsync(
+            context,
+            400,
+            "InvalidArgument",
+            "Unsupported x-amz-server-side-encryption value. Only AES256 is supported."
+        );
+        return Results.Empty;
+    }
+
+    private static bool TryGetSseAlgorithm(HttpRequest request, out string? algorithm)
+    {
+        var sseHeader = request.Headers["x-amz-server-side-encryption"].ToString();
+        if (string.IsNullOrEmpty(sseHeader))
+        {
+            algorithm = null;
+            return true;
+        }
+
+        if (!string.Equals(sseHeader, "AES256", StringComparison.Ordinal))
+        {
+            algorithm = null;
+            return false;
+        }
+
+        algorithm = sseHeader;
+        return true;
+    }
+
+    private static async Task SkipBytesAsync(
+        Stream stream,
+        long bytesToSkip,
+        CancellationToken cancellationToken
+    )
+    {
+        if (bytesToSkip <= 0)
+        {
+            return;
+        }
+
+        var buffer = ArrayPool<byte>.Shared.Rent(8192);
+        try
+        {
+            long remaining = bytesToSkip;
+            while (remaining > 0)
+            {
+                var chunkSize = (int)Math.Min(buffer.Length, remaining);
+                var read = await stream.ReadAsync(buffer.AsMemory(0, chunkSize), cancellationToken);
+                if (read == 0)
+                {
+                    throw new EndOfStreamException("Unexpected end of stream while applying range.");
+                }
+
+                remaining -= read;
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
     public static void MapS3Endpoints(this IEndpointRouteBuilder app)
     {
-        // List Buckets (GET /)
-        app.MapPut(
+        // All S3 endpoints require authentication via the S3AuthRequiredFilter.
+        // This is the final defense layer — even if middleware is bypassed or misconfigured,
+        // no S3 endpoint will serve content without a validated AccessKey in context.
+        var s3 = app.MapGroup("").AddEndpointFilter<S3AuthRequiredFilter>();
+
+        s3.MapPut(
             "/{bucket}",
             async (string bucket, IStorageEngine storageEngine, HttpContext context) =>
             {
@@ -142,7 +211,7 @@ public static class S3Endpoints
         );
 
         // Head Bucket (HEAD /{bucket})
-        app.MapMethods(
+        s3.MapMethods(
             "/{bucket}",
             ["HEAD"],
             async (string bucket, IStorageEngine storageEngine, HttpContext context) =>
@@ -165,7 +234,7 @@ public static class S3Endpoints
         );
 
         // Delete Bucket (DELETE /{bucket})
-        app.MapDelete(
+        s3.MapDelete(
             "/{bucket}",
             async (string bucket, IStorageEngine storageEngine, HttpContext context) =>
             {
@@ -194,7 +263,7 @@ public static class S3Endpoints
         );
 
         // Get Bucket / List Objects V2 (GET /{bucket})
-        app.MapGet(
+        s3.MapGet(
             "/{bucket}",
             async (
                 string bucket,
@@ -448,7 +517,7 @@ public static class S3Endpoints
         // Multipart: Upload Part (PUT /{bucket}/{**key}?partNumber=X&uploadId=Y)
         // CopyObject: PUT /{bucket}/{**key} with x-amz-copy-source
         // Standard: Put Object (PUT /{bucket}/{**key})
-        app.MapPut(
+        s3.MapPut(
             "/{bucket}/{**key}",
             async (
                 string bucket,
@@ -596,9 +665,10 @@ public static class S3Endpoints
 
                 // Standard PutObject
                 var contentType = context.Request.ContentType ?? "application/octet-stream";
-                var encryption = context.Request.Headers["x-amz-server-side-encryption"].ToString();
-                if (string.IsNullOrEmpty(encryption))
-                    encryption = null;
+                if (!TryGetSseAlgorithm(context.Request, out var encryption))
+                {
+                    return await WriteInvalidSseHeaderAsync(context);
+                }
 
                 var metadata = new Dictionary<string, string>();
                 foreach (var header in context.Request.Headers)
@@ -633,7 +703,7 @@ public static class S3Endpoints
         );
 
         // Multipart: Initiate or Complete (POST /{bucket}/{**key}?uploads OR uploadId=Z)
-        app.MapPost(
+        s3.MapPost(
             "/{bucket}/{**key}",
             async (
                 string bucket,
@@ -658,11 +728,10 @@ public static class S3Endpoints
                 if (context.Request.Query.ContainsKey("uploads"))
                 {
                     var contentType = context.Request.ContentType ?? "application/octet-stream";
-                    var encryption = context
-                        .Request.Headers["x-amz-server-side-encryption"]
-                        .ToString();
-                    if (string.IsNullOrEmpty(encryption))
-                        encryption = null;
+                    if (!TryGetSseAlgorithm(context.Request, out var encryption))
+                    {
+                        return await WriteInvalidSseHeaderAsync(context);
+                    }
 
                     var metadata = new Dictionary<string, string>();
                     foreach (var header in context.Request.Headers)
@@ -768,7 +837,7 @@ public static class S3Endpoints
         );
 
         // Batch Delete (POST /{bucket}?delete)
-        app.MapPost(
+        s3.MapPost(
             "/{bucket}",
             async (string bucket, IStorageEngine storageEngine, HttpContext context) =>
             {
@@ -850,7 +919,7 @@ public static class S3Endpoints
         );
 
         // Head Object (HEAD /{bucket}/{**key})
-        app.MapMethods(
+        s3.MapMethods(
             "/{bucket}/{**key}",
             ["HEAD"],
             async (
@@ -900,7 +969,7 @@ public static class S3Endpoints
 
         // Get Object (GET /{bucket}/{**key})
         // List Parts (GET /{bucket}/{**key}?uploadId=...)
-        app.MapGet(
+        s3.MapGet(
             "/{bucket}/{**key}",
             async (
                 string bucket,
@@ -1083,7 +1152,14 @@ public static class S3Endpoints
                     }
 
                     var (_, content) = result.Value;
-                    content.Seek(start, SeekOrigin.Begin);
+                    if (content.CanSeek)
+                    {
+                        content.Seek(start, SeekOrigin.Begin);
+                    }
+                    else
+                    {
+                        await SkipBytesAsync(content, start, context.RequestAborted);
+                    }
                     var length = end - start + 1;
 
                     context.Response.StatusCode = 206;
@@ -1116,7 +1192,7 @@ public static class S3Endpoints
         );
 
         // Delete Object (DELETE /{bucket}/{**key})
-        app.MapDelete(
+        s3.MapDelete(
             "/{bucket}/{**key}",
             async (
                 string bucket,

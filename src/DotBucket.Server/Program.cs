@@ -38,6 +38,9 @@ builder.Services.AddCors(options =>
 
 // Register Notification Services
 builder.Services.AddHttpClient();
+builder
+    .Services.AddHttpClient("WebhookClient")
+    .ConfigurePrimaryHttpMessageHandler(() => NotificationDispatcher.CreateSsrfSafeHandler());
 builder.Services.AddSingleton<NotificationDispatcher>();
 
 // Configure Storage Engine
@@ -78,6 +81,13 @@ builder.Services.AddScoped<AdminTokenEndpointFilter>();
 // Add Native AOT-safe OpenAPI documentation (.NET 10 feature)
 builder.Services.AddOpenApi();
 
+// Configure HSTS for production
+builder.Services.AddHsts(options =>
+{
+    options.MaxAge = TimeSpan.FromDays(365);
+    options.IncludeSubDomains = true;
+});
+
 // Configure JSON options for Minimal APIs to use the source-generated context
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
@@ -86,12 +96,62 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 
 var app = builder.Build();
 
+// Validate root credentials at startup
+if (
+    string.IsNullOrEmpty(authOptions.RootAccessKey)
+    || string.IsNullOrEmpty(authOptions.RootSecretKey)
+)
+{
+    app.Logger.LogCritical(
+        "Auth:RootAccessKey and Auth:RootSecretKey MUST be configured. Server is running without root credentials."
+    );
+}
+else if (authOptions.RootAccessKey == "minioadmin" || authOptions.RootSecretKey == "minioadmin")
+{
+    app.Logger.LogCritical(
+        "Auth:RootAccessKey and Auth:RootSecretKey are using well-known default values. Change them immediately."
+    );
+}
+
+// HTTPS enforcement
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHsts();
+}
+app.UseHttpsRedirection();
+
 app.UseCors("AllowFrontend");
 
-// Map OpenAPI endpoint
-app.MapOpenApi();
+// Map OpenAPI endpoint (Development only)
+if (app.Environment.IsDevelopment())
+{
+    app.MapOpenApi();
+}
 
-// S3 ListBuckets Middleware (Intersects GET / for S3 clients only)
+// Serve static files from the wwwroot directory (the compiled React app)
+app.MapStaticAssets();
+
+// S3 Auth and Authorization middlewares apply to ALL non-excluded paths.
+// S3AuthMiddleware handles the distinction between S3 requests (auth headers present)
+// and SPA requests (no auth headers, only root path allowed through).
+app.UseWhen(
+    ctx =>
+        !ctx.Request.Path.StartsWithSegments("/admin")
+        && !ctx.Request.Path.StartsWithSegments("/health")
+        && !ctx.Request.Path.StartsWithSegments("/assets")
+        && !ctx.Request.Path.StartsWithSegments("/dotbucket-logo.svg")
+        && !ctx.Request.Path.StartsWithSegments("/favicon.ico")
+        && !ctx.Request.Path.StartsWithSegments("/robots.txt")
+        && !ctx.Request.Path.StartsWithSegments("/_internal"),
+    appBuilder =>
+    {
+        appBuilder.UseMiddleware<S3AuthMiddleware>();
+        appBuilder.UseMiddleware<S3AuthorizationMiddleware>();
+    }
+);
+
+// S3 ListBuckets Middleware (Intersects GET / for authenticated S3 clients only)
+// Runs AFTER auth middleware so only authenticated requests can list buckets.
 app.Use(
     async (context, next) =>
     {
@@ -101,7 +161,8 @@ app.Use(
                 context.Request.Headers.ContainsKey("Authorization")
                 || context.Request.Headers.ContainsKey("x-amz-date");
 
-            if (isS3Request)
+            // Only serve bucket list if this is an authenticated S3 request
+            if (isS3Request && context.Items.ContainsKey("AccessKey"))
             {
                 var storageEngine = context.RequestServices.GetRequiredService<IStorageEngine>();
                 var buckets = await storageEngine.ListBucketsAsync(context.RequestAborted);
@@ -145,29 +206,6 @@ app.Use(
     }
 );
 
-// Serve static files from the wwwroot directory (the compiled React app)
-app.MapStaticAssets();
-
-// Add the S3 Auth and Authorization middlewares only for non-UI/API paths
-app.UseWhen(
-    ctx =>
-        !ctx.Request.Path.StartsWithSegments("/admin")
-        && !ctx.Request.Path.StartsWithSegments("/health")
-        && !ctx.Request.Path.StartsWithSegments("/assets")
-        && !ctx.Request.Path.StartsWithSegments("/_internal")
-        && !ctx.Request.Path.StartsWithSegments("/openapi")
-        && !ctx.Request.Path.Value!.EndsWith(".js")
-        && !ctx.Request.Path.Value!.EndsWith(".css")
-        && !ctx.Request.Path.Value!.EndsWith(".svg")
-        && !ctx.Request.Path.Value!.EndsWith(".ico")
-        && !ctx.Request.Headers.Accept.ToString().Contains("text/html"),
-    appBuilder =>
-    {
-        appBuilder.UseMiddleware<S3AuthMiddleware>();
-        appBuilder.UseMiddleware<S3AuthorizationMiddleware>();
-    }
-);
-
 // Map S3 API endpoints
 app.MapS3Endpoints();
 
@@ -183,8 +221,26 @@ if (clusterConfig?.Enabled == true)
     app.MapInternalEndpoints();
 }
 
-// Basic health check endpoint (bypasses Auth)
-app.MapGet("/health", () => Results.Ok(new AdminHealthResponse("Healthy")));
+// Health check endpoint with actual readiness probe (bypasses Auth)
+app.MapGet(
+    "/health",
+    async (IStorageEngine storage, CancellationToken ct) =>
+    {
+        try
+        {
+            await storage.ListBucketsAsync(ct);
+            return Results.Ok(new AdminHealthResponse("Healthy"));
+        }
+        catch
+        {
+            return Results.Json(
+                new AdminHealthResponse("Unhealthy"),
+                StorageObjectJsonContext.Default.AdminHealthResponse,
+                statusCode: 503
+            );
+        }
+    }
+);
 
 // Fallback all other non-API routes to serve the React Frontend SPA
 app.MapFallbackToFile("index.html");

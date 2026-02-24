@@ -31,16 +31,16 @@ public class DistributedStorageEngine(
     {
         if (cluster.IsLeader)
         {
-            // Create locally first
             var bucket = await local.CreateBucketAsync(bucketName, objectLock, cancellationToken);
+            var successCount = 1;
 
-            // Fan out to all other nodes (best effort)
             var peers = cluster.AllNodes.Where(n => !n.IsSelf).ToList();
             var tasks = peers.Select(async peer =>
             {
                 try
                 {
                     await nodeClient.CreateBucketAsync(peer.Address, bucketName, cancellationToken);
+                    return true;
                 }
                 catch (Exception ex)
                 {
@@ -49,23 +49,44 @@ public class DistributedStorageEngine(
                         "Failed to replicate bucket creation to {NodeId}",
                         peer.NodeId
                     );
+                    return false;
                 }
             });
-            await Task.WhenAll(tasks);
+            var results = await Task.WhenAll(tasks);
+            successCount += results.Count(r => r);
+
+            var requiredQuorum = (cluster.AllNodes.Count / 2) + 1;
+            if (successCount < requiredQuorum)
+            {
+                // Roll back local create to prevent divergence
+                try
+                {
+                    await local.DeleteBucketAsync(bucketName, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(
+                        ex,
+                        "Failed to roll back local bucket creation for {Bucket}",
+                        bucketName
+                    );
+                }
+
+                throw new InvalidOperationException(
+                    $"Bucket creation quorum not met: {successCount}/{requiredQuorum} nodes acknowledged."
+                );
+            }
 
             return bucket;
         }
-        else
-        {
-            // Forward to leader
-            var leader = cluster.AllNodes.First(n => n.IsLeader);
-            var result = await nodeClient.CreateBucketAsync(
-                leader.Address,
-                bucketName,
-                cancellationToken
-            );
-            return result ?? throw new InvalidOperationException("Leader failed to create bucket.");
-        }
+
+        var leader = cluster.GetLeaderNode();
+        var result = await nodeClient.CreateBucketAsync(
+            leader.Address,
+            bucketName,
+            cancellationToken
+        );
+        return result ?? throw new InvalidOperationException("Leader failed to create bucket.");
     }
 
     public async Task SetObjectLockConfigAsync(
@@ -77,7 +98,51 @@ public class DistributedStorageEngine(
         if (cluster.IsLeader)
         {
             await local.SetObjectLockConfigAsync(bucketName, config, cancellationToken);
-            // Replicate best-effort or forward if not leader (skipping full fanout for now for brevity, standard pattern follows)
+            var successCount = 1;
+
+            var peers = cluster.AllNodes.Where(n => !n.IsSelf).ToList();
+            var tasks = peers.Select(async peer =>
+            {
+                try
+                {
+                    await nodeClient.SetObjectLockConfigAsync(
+                        peer.Address,
+                        bucketName,
+                        config,
+                        cancellationToken
+                    );
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(
+                        ex,
+                        "Failed to replicate object-lock config to {NodeId}",
+                        peer.NodeId
+                    );
+                    return false;
+                }
+            });
+            var results = await Task.WhenAll(tasks);
+            successCount += results.Count(r => r);
+
+            var requiredQuorum = (cluster.AllNodes.Count / 2) + 1;
+            if (successCount < requiredQuorum)
+            {
+                throw new InvalidOperationException(
+                    $"Set object-lock config quorum not met: {successCount}/{requiredQuorum} nodes acknowledged."
+                );
+            }
+        }
+        else
+        {
+            var leader = cluster.GetLeaderNode();
+            await nodeClient.SetObjectLockConfigAsync(
+                leader.Address,
+                bucketName,
+                config,
+                cancellationToken
+            );
         }
     }
 
@@ -90,20 +155,56 @@ public class DistributedStorageEngine(
         CancellationToken cancellationToken = default
     )
     {
-        // Enforce on all replicas
         var preferenceList = placement.GetPreferenceList(bucketName, objectKey);
-        foreach (var node in preferenceList)
+        var tasks = preferenceList.Select(async node =>
         {
-            if (node.IsSelf)
-                await local.SetObjectRetentionAsync(
+            try
+            {
+                if (node.IsSelf)
+                {
+                    await local.SetObjectRetentionAsync(
+                        bucketName,
+                        objectKey,
+                        versionId,
+                        mode,
+                        retainUntil,
+                        cancellationToken
+                    );
+                }
+                else
+                {
+                    await nodeClient.SetObjectRetentionAsync(
+                        node.Address,
+                        bucketName,
+                        objectKey,
+                        versionId,
+                        mode,
+                        retainUntil,
+                        cancellationToken
+                    );
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Failed to set retention on {NodeId} for {Bucket}/{Key}",
+                    node.NodeId,
                     bucketName,
-                    objectKey,
-                    versionId,
-                    mode,
-                    retainUntil,
-                    cancellationToken
+                    objectKey
                 );
-            // else await nodeClient.SetObjectRetentionAsync(...)
+                return false;
+            }
+        });
+
+        var results = await Task.WhenAll(tasks);
+        var successCount = results.Count(r => r);
+        if (successCount < _options.WriteQuorum)
+        {
+            throw new InvalidOperationException(
+                $"Set retention quorum not met: {successCount}/{_options.WriteQuorum} nodes acknowledged."
+            );
         }
     }
 
@@ -115,18 +216,54 @@ public class DistributedStorageEngine(
         CancellationToken cancellationToken = default
     )
     {
-        // Enforce on all replicas
         var preferenceList = placement.GetPreferenceList(bucketName, objectKey);
-        foreach (var node in preferenceList)
+        var tasks = preferenceList.Select(async node =>
         {
-            if (node.IsSelf)
-                await local.SetObjectLegalHoldAsync(
+            try
+            {
+                if (node.IsSelf)
+                {
+                    await local.SetObjectLegalHoldAsync(
+                        bucketName,
+                        objectKey,
+                        versionId,
+                        hold,
+                        cancellationToken
+                    );
+                }
+                else
+                {
+                    await nodeClient.SetObjectLegalHoldAsync(
+                        node.Address,
+                        bucketName,
+                        objectKey,
+                        versionId,
+                        hold,
+                        cancellationToken
+                    );
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Failed to set legal hold on {NodeId} for {Bucket}/{Key}",
+                    node.NodeId,
                     bucketName,
-                    objectKey,
-                    versionId,
-                    hold,
-                    cancellationToken
+                    objectKey
                 );
+                return false;
+            }
+        });
+
+        var results = await Task.WhenAll(tasks);
+        var successCount = results.Count(r => r);
+        if (successCount < _options.WriteQuorum)
+        {
+            throw new InvalidOperationException(
+                $"Set legal hold quorum not met: {successCount}/{_options.WriteQuorum} nodes acknowledged."
+            );
         }
     }
 
@@ -137,14 +274,15 @@ public class DistributedStorageEngine(
     {
         if (cluster.IsLeader)
         {
-            await local.DeleteBucketAsync(bucketName, cancellationToken);
-
+            // Replicate deletes to peers FIRST, only delete locally on quorum success
+            // to prevent divergence where leader has deleted but peers haven't.
             var peers = cluster.AllNodes.Where(n => !n.IsSelf).ToList();
             var tasks = peers.Select(async peer =>
             {
                 try
                 {
                     await nodeClient.DeleteBucketAsync(peer.Address, bucketName, cancellationToken);
+                    return true;
                 }
                 catch (Exception ex)
                 {
@@ -153,13 +291,27 @@ public class DistributedStorageEngine(
                         "Failed to replicate bucket deletion to {NodeId}",
                         peer.NodeId
                     );
+                    return false;
                 }
             });
-            await Task.WhenAll(tasks);
+            var results = await Task.WhenAll(tasks);
+            var successCount = results.Count(r => r);
+
+            // Check quorum (peer successes + 1 for self, which we haven't committed yet)
+            var requiredQuorum = (cluster.AllNodes.Count / 2) + 1;
+            if (successCount + 1 < requiredQuorum)
+            {
+                throw new InvalidOperationException(
+                    $"Bucket deletion quorum not met: {successCount + 1}/{requiredQuorum} nodes acknowledged."
+                );
+            }
+
+            // Quorum achieved — commit locally
+            await local.DeleteBucketAsync(bucketName, cancellationToken);
         }
         else
         {
-            var leader = cluster.AllNodes.First(n => n.IsLeader);
+            var leader = cluster.GetLeaderNode();
             await nodeClient.DeleteBucketAsync(leader.Address, bucketName, cancellationToken);
         }
     }
@@ -172,7 +324,12 @@ public class DistributedStorageEngine(
     {
         if (cluster.IsLeader)
         {
+            // Capture previous state for rollback
+            var bucket = await local.GetBucketAsync(bucketName, cancellationToken);
+            var previousStatus = bucket?.Versioning ?? VersioningStatus.Off;
+
             await local.SetVersioningAsync(bucketName, status, cancellationToken);
+            var successCount = 1;
 
             var peers = cluster.AllNodes.Where(n => !n.IsSelf).ToList();
             var tasks = peers.Select(async peer =>
@@ -185,6 +342,7 @@ public class DistributedStorageEngine(
                         status.ToString(),
                         cancellationToken
                     );
+                    return true;
                 }
                 catch (Exception ex)
                 {
@@ -193,13 +351,33 @@ public class DistributedStorageEngine(
                         "Failed to replicate versioning to {NodeId}",
                         peer.NodeId
                     );
+                    return false;
                 }
             });
-            await Task.WhenAll(tasks);
+            var results = await Task.WhenAll(tasks);
+            successCount += results.Count(r => r);
+
+            var requiredQuorum = (cluster.AllNodes.Count / 2) + 1;
+            if (successCount < requiredQuorum)
+            {
+                // Roll back local versioning change
+                try
+                {
+                    await local.SetVersioningAsync(bucketName, previousStatus, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Failed to roll back versioning for {Bucket}", bucketName);
+                }
+
+                throw new InvalidOperationException(
+                    $"Set versioning quorum not met: {successCount}/{requiredQuorum} nodes acknowledged."
+                );
+            }
         }
         else
         {
-            var leader = cluster.AllNodes.First(n => n.IsLeader);
+            var leader = cluster.GetLeaderNode();
             await nodeClient.SetVersioningAsync(
                 leader.Address,
                 bucketName,
@@ -272,7 +450,8 @@ public class DistributedStorageEngine(
                 content,
                 contentType,
                 metadata,
-                cancellationToken
+                cancellationToken,
+                encryption: encryption
             );
             return result
                 ?? throw new InvalidOperationException("Primary node failed to store object.");
@@ -289,80 +468,91 @@ public class DistributedStorageEngine(
             cancellationToken
         );
 
-        // Replicate to other nodes in the preference list (asynchronously)
+        var successCount = 1; // local write succeeded
+
+        // Replicate to other nodes in the preference list and wait for quorum
         var replicaTargets = preferenceList.Skip(1).ToList();
         if (replicaTargets.Count > 0)
         {
-            // Background replication: we have the local file now, so we can stream from it
-            _ = Task.Run(
-                async () =>
+            var replicaTasks = replicaTargets
+                .Select(async target =>
                 {
                     try
                     {
-                        // Re-read from local storage to get a fresh stream for each replica
-                        var readResult = await local.GetObjectAsync(
+                        var replicaReadResult = await local.GetObjectAsync(
                             bucketName,
                             objectKey,
                             localResult.VersionId,
-                            CancellationToken.None
+                            cancellationToken
                         );
-                        if (readResult != null)
+                        if (replicaReadResult != null)
                         {
-                            var (meta, stream) = readResult.Value;
-                            await using (stream)
-                            {
-                                // We need to send the stream to multiple nodes.
-                                // Since we are in a background task and have a local file, we can just do them sequentially
-                                // or parallelize by opening multiple streams.
-                                foreach (var target in replicaTargets)
-                                {
-                                    try
-                                    {
-                                        var replicaReadResult = await local.GetObjectAsync(
-                                            bucketName,
-                                            objectKey,
-                                            localResult.VersionId,
-                                            CancellationToken.None
-                                        );
-                                        if (replicaReadResult != null)
-                                        {
-                                            await using var replicaStream = replicaReadResult
-                                                .Value
-                                                .Content;
-                                            await nodeClient.PutObjectAsync(
-                                                target.Address,
-                                                bucketName,
-                                                objectKey,
-                                                replicaStream,
-                                                meta.ContentType,
-                                                meta.Metadata,
-                                                CancellationToken.None
-                                            );
-                                        }
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        logger.LogWarning(
-                                            ex,
-                                            "Failed to replicate to {NodeId}",
-                                            target.NodeId
-                                        );
-                                    }
-                                }
-                            }
+                            await using var replicaStream = replicaReadResult.Value.Content;
+                            await nodeClient.PutObjectAsync(
+                                target.Address,
+                                bucketName,
+                                objectKey,
+                                replicaStream,
+                                localResult.ContentType,
+                                localResult.Metadata,
+                                cancellationToken,
+                                localResult.VersionId,
+                                localResult.Encryption
+                            );
+                            return true;
                         }
+                        return false;
                     }
                     catch (Exception ex)
                     {
-                        logger.LogError(
+                        logger.LogWarning(
                             ex,
-                            "Background replication failed for {Bucket}/{Key}",
+                            "Failed to replicate PUT {Bucket}/{Key} to {NodeId}",
                             bucketName,
-                            objectKey
+                            objectKey,
+                            target.NodeId
                         );
+                        return false;
                     }
-                },
-                CancellationToken.None
+                })
+                .ToList();
+
+            var results = await Task.WhenAll(replicaTasks);
+            successCount += results.Count(r => r);
+        }
+
+        if (successCount < _options.WriteQuorum)
+        {
+            logger.LogError(
+                "Write quorum not met for PUT {Bucket}/{Key}: {Count}/{Quorum}",
+                bucketName,
+                objectKey,
+                successCount,
+                _options.WriteQuorum
+            );
+
+            // Roll back local write to prevent divergence
+            try
+            {
+                await local.DeleteObjectAsync(
+                    bucketName,
+                    objectKey,
+                    localResult.VersionId,
+                    cancellationToken
+                );
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(
+                    ex,
+                    "Failed to roll back local write for {Bucket}/{Key}",
+                    bucketName,
+                    objectKey
+                );
+            }
+
+            throw new InvalidOperationException(
+                $"Write quorum not met: {successCount}/{_options.WriteQuorum} nodes acknowledged the write."
             );
         }
 
@@ -377,61 +567,60 @@ public class DistributedStorageEngine(
     )
     {
         var preferenceList = placement.GetPreferenceList(bucketName, objectKey);
-        var successCount = 0;
-        var tasks = new List<Task<bool>>();
+        var isSelfInList = preferenceList.Any(n => n.IsSelf);
 
-        foreach (var node in preferenceList)
-        {
-            if (node.IsSelf)
+        // Replicate deletes to remote peers FIRST
+        var remoteTasks = preferenceList
+            .Where(n => !n.IsSelf)
+            .Select(async node =>
             {
-                await local.DeleteObjectAsync(bucketName, objectKey, versionId, cancellationToken);
-                successCount++;
-            }
-            else
-            {
-                var task = Task.Run(
-                    async () =>
-                    {
-                        try
-                        {
-                            return await nodeClient.DeleteObjectAsync(
-                                node.Address,
-                                bucketName,
-                                objectKey,
-                                versionId,
-                                cancellationToken
-                            );
-                        }
-                        catch (Exception ex)
-                        {
-                            logger.LogWarning(
-                                ex,
-                                "Failed to replicate DELETE {Bucket}/{Key} to {NodeId}",
-                                bucketName,
-                                objectKey,
-                                node.NodeId
-                            );
-                            return false;
-                        }
-                    },
-                    cancellationToken
-                );
-                tasks.Add(task);
-            }
-        }
+                try
+                {
+                    return await nodeClient.DeleteObjectAsync(
+                        node.Address,
+                        bucketName,
+                        objectKey,
+                        versionId,
+                        cancellationToken
+                    );
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(
+                        ex,
+                        "Failed to replicate DELETE {Bucket}/{Key} to {NodeId}",
+                        bucketName,
+                        objectKey,
+                        node.NodeId
+                    );
+                    return false;
+                }
+            })
+            .ToList();
 
-        var results = await Task.WhenAll(tasks);
-        successCount += results.Count(r => r);
+        var results = await Task.WhenAll(remoteTasks);
+        var remoteSuccessCount = results.Count(r => r);
 
-        if (successCount < _options.WriteQuorum)
+        // Check if quorum is achievable (remote successes + self if in list)
+        var totalPossible = remoteSuccessCount + (isSelfInList ? 1 : 0);
+        if (totalPossible < _options.WriteQuorum)
         {
-            logger.LogWarning(
+            logger.LogError(
                 "Delete quorum not met for {Bucket}/{Key}: {Count}/{Quorum}",
                 bucketName,
                 objectKey,
-                successCount,
+                totalPossible,
                 _options.WriteQuorum
             );
+            throw new InvalidOperationException(
+                $"Delete quorum not met: {totalPossible}/{_options.WriteQuorum} nodes acknowledged."
+            );
+        }
+
+        // Quorum achievable — commit local delete
+        if (isSelfInList)
+        {
+            await local.DeleteObjectAsync(bucketName, objectKey, versionId, cancellationToken);
         }
 
         return true;
@@ -483,8 +672,15 @@ public class DistributedStorageEngine(
         {
             try
             {
-                await DeleteObjectAsync(bucketName, key, versionId, cancellationToken);
-                results.Add((key, true, null, null));
+                var deleted = await DeleteObjectAsync(bucketName, key, versionId, cancellationToken);
+                if (deleted)
+                {
+                    results.Add((key, true, null, null));
+                }
+                else
+                {
+                    results.Add((key, false, "InternalError", "Delete failed on all replicas."));
+                }
             }
             catch (Exception ex)
             {
@@ -674,17 +870,43 @@ public class DistributedStorageEngine(
         CancellationToken cancellationToken = default
     )
     {
-        // For distributed listing, we use local storage since each node owns its data
-        // A full distributed listing with pagination across nodes would require a more
-        // sophisticated merge algorithm. For now, serve from local.
-        return await local.ListObjectsPagedAsync(
-            bucketName,
-            prefix,
-            continuationToken,
-            startAfter,
-            maxKeys,
-            cancellationToken
-        );
+        var allObjects = (
+            await ListObjectsAsync(bucketName, prefix, versions: false, cancellationToken)
+        ).ToList();
+
+        string? cursorKey = startAfter;
+        if (continuationToken != null)
+        {
+            try
+            {
+                cursorKey = System.Text.Encoding.UTF8.GetString(
+                    Convert.FromBase64String(continuationToken)
+                );
+            }
+            catch
+            {
+                cursorKey = null;
+            }
+        }
+
+        var filtered = string.IsNullOrEmpty(cursorKey)
+            ? allObjects
+            : allObjects.Where(o => string.CompareOrdinal(o.ObjectKey, cursorKey) > 0).ToList();
+
+        var page = filtered.Take(maxKeys + 1).ToList();
+        var isTruncated = page.Count > maxKeys;
+        if (isTruncated)
+        {
+            page.RemoveAt(page.Count - 1);
+        }
+
+        string? nextToken = null;
+        if (isTruncated && page.Count > 0)
+        {
+            nextToken = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(page[^1].ObjectKey));
+        }
+
+        return (page, nextToken, isTruncated);
     }
 
     // ========================================================================
@@ -749,47 +971,91 @@ public class DistributedStorageEngine(
 
         // Then replicate the completed object to other nodes in the preference list
         var replicaTargets = placement.GetReplicaTargets(bucketName, objectKey);
-        if (replicaTargets.Count > 0)
+        if (replicaTargets.Count <= 0)
         {
-            var localResult = await local.GetObjectAsync(
+            return result;
+        }
+
+        var localResult = await local.GetObjectAsync(
+            bucketName,
+            objectKey,
+            result.VersionId,
+            cancellationToken
+        );
+        if (localResult == null)
+        {
+            return result;
+        }
+
+        var (meta, content) = localResult.Value;
+        using var buffer = new MemoryStream();
+        await content.CopyToAsync(buffer, cancellationToken);
+        await content.DisposeAsync();
+
+        var successCount = 1; // local complete succeeded
+        var tasks = replicaTargets.Select(async node =>
+        {
+            try
+            {
+                var ms = new MemoryStream(buffer.ToArray());
+                await nodeClient.PutObjectAsync(
+                    node.Address,
+                    bucketName,
+                    objectKey,
+                    ms,
+                    meta.ContentType,
+                    meta.Metadata,
+                    cancellationToken,
+                    result.VersionId,
+                    meta.Encryption
+                );
+                return true;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Failed to replicate completed multipart to {NodeId}",
+                    node.NodeId
+                );
+                return false;
+            }
+        });
+        var replicationResults = await Task.WhenAll(tasks);
+        successCount += replicationResults.Count(r => r);
+
+        if (successCount < _options.WriteQuorum)
+        {
+            logger.LogError(
+                "Write quorum not met for completed multipart {Bucket}/{Key}: {Count}/{Quorum}",
                 bucketName,
                 objectKey,
-                result.VersionId,
-                cancellationToken
+                successCount,
+                _options.WriteQuorum
             );
-            if (localResult != null)
-            {
-                var (meta, content) = localResult.Value;
-                using var buffer = new MemoryStream();
-                await content.CopyToAsync(buffer, cancellationToken);
-                await content.DisposeAsync();
 
-                var tasks = replicaTargets.Select(async node =>
-                {
-                    try
-                    {
-                        var ms = new MemoryStream(buffer.ToArray());
-                        await nodeClient.PutObjectAsync(
-                            node.Address,
-                            bucketName,
-                            objectKey,
-                            ms,
-                            meta.ContentType,
-                            meta.Metadata,
-                            cancellationToken
-                        );
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogWarning(
-                            ex,
-                            "Failed to replicate completed multipart to {NodeId}",
-                            node.NodeId
-                        );
-                    }
-                });
-                await Task.WhenAll(tasks);
+            try
+            {
+                await local.DeleteObjectAsync(
+                    bucketName,
+                    objectKey,
+                    result.VersionId,
+                    cancellationToken
+                );
             }
+            catch (Exception ex)
+            {
+                logger.LogError(
+                    ex,
+                    "Failed to roll back completed multipart object for {Bucket}/{Key}",
+                    bucketName,
+                    objectKey
+                );
+            }
+
+            throw new InvalidOperationException(
+                $"Write quorum not met: {successCount}/{_options.WriteQuorum} nodes acknowledged completed multipart upload."
+            );
         }
 
         return result;

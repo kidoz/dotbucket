@@ -28,6 +28,12 @@ public static class InternalEndpoints
             {
                 var contentType = request.ContentType ?? "application/octet-stream";
 
+                // Extract replica version ID for consistent versioning across nodes
+                string? replicaVersionId = request.Headers["X-DotBucket-VersionId"].FirstOrDefault();
+
+                // Extract encryption flag
+                string? encryption = request.Headers["X-DotBucket-Encryption"].FirstOrDefault();
+
                 // Extract metadata from headers
                 Dictionary<string, string>? metadata = null;
                 foreach (var header in request.Headers)
@@ -51,8 +57,9 @@ public static class InternalEndpoints
                     request.Body,
                     contentType,
                     metadata,
-                    null,
-                    ct
+                    encryption,
+                    ct,
+                    replicaVersionId
                 );
                 return Results.Ok(obj);
             }
@@ -200,6 +207,92 @@ public static class InternalEndpoints
                     return Results.BadRequest();
 
                 await storage.SetVersioningAsync(bucketName, status, ct);
+                return Results.Ok();
+            }
+        );
+
+        // POST /_internal/buckets/{bucketName}/object-lock
+        group.MapPost(
+            "/buckets/{bucketName}/object-lock",
+            async (
+                string bucketName,
+                HttpRequest request,
+                LocalFileSystemStorageEngine storage,
+                CancellationToken ct
+            ) =>
+            {
+                var body = await JsonSerializer.DeserializeAsync(
+                    request.Body,
+                    StorageObjectJsonContext.Default.InternalSetObjectLockConfigRequest,
+                    ct
+                );
+                if (body == null)
+                    return Results.BadRequest();
+
+                var config = new ObjectLockConfig
+                {
+                    Enabled = body.Enabled,
+                    DefaultRetentionMode = body.DefaultRetentionMode,
+                    DefaultRetentionDays = body.DefaultRetentionDays,
+                };
+                await storage.SetObjectLockConfigAsync(bucketName, config, ct);
+                return Results.Ok();
+            }
+        );
+
+        // POST /_internal/objects/{bucket}/retention/{**key}
+        group.MapPost(
+            "/objects/{bucket}/retention/{**key}",
+            async (
+                string bucket,
+                string key,
+                string? versionId,
+                HttpRequest request,
+                LocalFileSystemStorageEngine storage,
+                CancellationToken ct
+            ) =>
+            {
+                var body = await JsonSerializer.DeserializeAsync(
+                    request.Body,
+                    StorageObjectJsonContext.Default.InternalSetObjectRetentionRequest,
+                    ct
+                );
+                if (body == null)
+                    return Results.BadRequest();
+
+                await storage.SetObjectRetentionAsync(
+                    bucket,
+                    key,
+                    versionId,
+                    body.Mode,
+                    body.RetainUntil,
+                    ct
+                );
+                return Results.Ok();
+            }
+        );
+
+        // POST /_internal/objects/{bucket}/legal-hold/{**key}
+        group.MapPost(
+            "/objects/{bucket}/legal-hold/{**key}",
+            async (
+                string bucket,
+                string key,
+                string? versionId,
+                HttpRequest request,
+                LocalFileSystemStorageEngine storage,
+                CancellationToken ct
+            ) =>
+            {
+                var body = await JsonSerializer.DeserializeAsync(
+                    request.Body,
+                    StorageObjectJsonContext.Default.InternalSetObjectLegalHoldRequest,
+                    ct
+                );
+                if (body == null)
+                    return Results.BadRequest();
+
+                await storage.SetObjectLegalHoldAsync(bucket, key, versionId, body.Hold, ct);
                 return Results.Ok();
             }
         );

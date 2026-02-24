@@ -8,14 +8,16 @@ services:
       - dotbucket-data-1:/data
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
-      - Auth__AdminToken=my-admin-token
-      - Auth__RootAccessKey=admin
-      - Auth__RootSecretKey=admin123
+      # IMPORTANT: Replace these with strong, unique values before deploying.
+      # Generate a secure token: openssl rand -hex 32
+      - Auth__AdminToken=${DOTBUCKET_ADMIN_TOKEN:?Set DOTBUCKET_ADMIN_TOKEN}
+      - Auth__RootAccessKey=${DOTBUCKET_ROOT_ACCESS_KEY:?Set DOTBUCKET_ROOT_ACCESS_KEY}
+      - Auth__RootSecretKey=${DOTBUCKET_ROOT_SECRET_KEY:?Set DOTBUCKET_ROOT_SECRET_KEY}
       - Cluster__Enabled=true
       - Cluster__NodeId=node-1
       - Cluster__AdvertiseAddress=http://dotbucket-1:9000
       - Cluster__LeaderNodeId=node-1
-      - Cluster__ClusterToken=my-secure-cluster-token
+      - Cluster__ClusterToken=${DOTBUCKET_CLUSTER_TOKEN:?Set DOTBUCKET_CLUSTER_TOKEN}
       - Cluster__ReplicationFactor=3
       - Cluster__WriteQuorum=2
       - Cluster__ReadQuorum=1
@@ -25,7 +27,8 @@ services:
       - "Cluster__Nodes__1__Address=http://dotbucket-2:9000"
       - "Cluster__Nodes__2__NodeId=node-3"
       - "Cluster__Nodes__2__Address=http://dotbucket-3:9000"
-      - Storage__MasterKey=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=
+      # Generate a 32-byte key: openssl rand -base64 32
+      - Storage__MasterKey=${DOTBUCKET_MASTER_KEY:?Set DOTBUCKET_MASTER_KEY}
     networks:
       - dotbucket-net
     healthcheck:
@@ -43,14 +46,14 @@ services:
       - dotbucket-data-2:/data
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
-      - Auth__AdminToken=my-admin-token
-      - Auth__RootAccessKey=admin
-      - Auth__RootSecretKey=admin123
+      - Auth__AdminToken=${DOTBUCKET_ADMIN_TOKEN:?Set DOTBUCKET_ADMIN_TOKEN}
+      - Auth__RootAccessKey=${DOTBUCKET_ROOT_ACCESS_KEY:?Set DOTBUCKET_ROOT_ACCESS_KEY}
+      - Auth__RootSecretKey=${DOTBUCKET_ROOT_SECRET_KEY:?Set DOTBUCKET_ROOT_SECRET_KEY}
       - Cluster__Enabled=true
       - Cluster__NodeId=node-2
       - Cluster__AdvertiseAddress=http://dotbucket-2:9000
       - Cluster__LeaderNodeId=node-1
-      - Cluster__ClusterToken=my-secure-cluster-token
+      - Cluster__ClusterToken=${DOTBUCKET_CLUSTER_TOKEN:?Set DOTBUCKET_CLUSTER_TOKEN}
       - Cluster__ReplicationFactor=3
       - Cluster__WriteQuorum=2
       - Cluster__ReadQuorum=1
@@ -60,7 +63,7 @@ services:
       - "Cluster__Nodes__1__Address=http://dotbucket-2:9000"
       - "Cluster__Nodes__2__NodeId=node-3"
       - "Cluster__Nodes__2__Address=http://dotbucket-3:9000"
-      - Storage__MasterKey=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=
+      - Storage__MasterKey=${DOTBUCKET_MASTER_KEY:?Set DOTBUCKET_MASTER_KEY}
     networks:
       - dotbucket-net
     healthcheck:
@@ -78,14 +81,14 @@ services:
       - dotbucket-data-3:/data
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
-      - Auth__AdminToken=my-admin-token
-      - Auth__RootAccessKey=admin
-      - Auth__RootSecretKey=admin123
+      - Auth__AdminToken=${DOTBUCKET_ADMIN_TOKEN:?Set DOTBUCKET_ADMIN_TOKEN}
+      - Auth__RootAccessKey=${DOTBUCKET_ROOT_ACCESS_KEY:?Set DOTBUCKET_ROOT_ACCESS_KEY}
+      - Auth__RootSecretKey=${DOTBUCKET_ROOT_SECRET_KEY:?Set DOTBUCKET_ROOT_SECRET_KEY}
       - Cluster__Enabled=true
       - Cluster__NodeId=node-3
       - Cluster__AdvertiseAddress=http://dotbucket-3:9000
       - Cluster__LeaderNodeId=node-1
-      - Cluster__ClusterToken=my-secure-cluster-token
+      - Cluster__ClusterToken=${DOTBUCKET_CLUSTER_TOKEN:?Set DOTBUCKET_CLUSTER_TOKEN}
       - Cluster__ReplicationFactor=3
       - Cluster__WriteQuorum=2
       - Cluster__ReadQuorum=1
@@ -95,7 +98,7 @@ services:
       - "Cluster__Nodes__1__Address=http://dotbucket-2:9000"
       - "Cluster__Nodes__2__NodeId=node-3"
       - "Cluster__Nodes__2__Address=http://dotbucket-3:9000"
-      - Storage__MasterKey=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=
+      - Storage__MasterKey=${DOTBUCKET_MASTER_KEY:?Set DOTBUCKET_MASTER_KEY}
     networks:
       - dotbucket-net
     healthcheck:

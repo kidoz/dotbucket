@@ -104,7 +104,39 @@ public class SigV4Authenticator(
         string payloadHash;
         if (context.Request.Headers.TryGetValue("x-amz-content-sha256", out var headerHash))
         {
-            payloadHash = headerHash.ToString();
+            var headerValue = headerHash.ToString();
+
+            // UNSIGNED-PAYLOAD and streaming modes skip body hash validation
+            if (
+                headerValue == "UNSIGNED-PAYLOAD"
+                || headerValue.StartsWith("STREAMING-", StringComparison.Ordinal)
+            )
+            {
+                payloadHash = headerValue;
+            }
+            else
+            {
+                // Compute actual body hash and verify it matches the header
+                using var sha256 = SHA256.Create();
+                var bodyHashBytes = await sha256.ComputeHashAsync(
+                    context.Request.Body,
+                    cancellationToken
+                );
+                var computedHash = Convert.ToHexString(bodyHashBytes).ToLowerInvariant();
+                context.Request.Body.Position = 0;
+
+                if (computedHash != headerValue)
+                {
+                    logger.LogWarning(
+                        "Payload hash mismatch: expected {Expected}, computed {Computed}",
+                        headerValue,
+                        computedHash
+                    );
+                    return false;
+                }
+
+                payloadHash = headerValue;
+            }
         }
         else
         {
@@ -114,7 +146,7 @@ public class SigV4Authenticator(
                 cancellationToken
             );
             payloadHash = Convert.ToHexString(bodyHashBytes).ToLowerInvariant();
-            context.Request.Body.Position = 0; // Reset stream position
+            context.Request.Body.Position = 0;
         }
 
         var canonicalRequest = BuildCanonicalRequest(

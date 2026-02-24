@@ -21,11 +21,17 @@ public record NodeHealth(NodeHealthStatus Status, DateTime LastSeen, int Consecu
 public class ClusterState
 {
     private readonly ClusterOptions _options;
+    private readonly ILogger<ClusterState> _logger;
     private readonly ConcurrentDictionary<string, NodeHealth> _healthMap = new();
+    private readonly Lock _leaderLock = new();
+    private string _leaderNodeId;
+    private long _leaderEpoch;
 
-    public ClusterState(IOptions<ClusterOptions> options)
+    public ClusterState(IOptions<ClusterOptions> options, ILogger<ClusterState> logger)
     {
         _options = options.Value;
+        _logger = logger;
+        _leaderNodeId = _options.LeaderNodeId;
 
         if (!_options.Enabled)
             return;
@@ -73,7 +79,9 @@ public class ClusterState
     public bool IsDistributed => _options.Enabled;
     public string SelfNodeId => _options.NodeId;
     public string SelfAddress => _options.AdvertiseAddress;
-    public bool IsLeader => _options.NodeId == _options.LeaderNodeId;
+    public bool IsLeader => _options.NodeId == _leaderNodeId;
+    public string LeaderNodeId => _leaderNodeId;
+    public long LeaderEpoch => _leaderEpoch;
     public IReadOnlyList<NodeInfo> AllNodes { get; } = [];
 
     public NodeHealth GetNodeHealth(string nodeId)
@@ -87,6 +95,7 @@ public class ClusterState
     public void UpdateNodeHealth(string nodeId, NodeHealth health)
     {
         _healthMap[nodeId] = health;
+        MaybePromoteLeader(nodeId, health);
     }
 
     public IReadOnlyList<NodeInfo> GetHealthyNodes()
@@ -94,5 +103,71 @@ public class ClusterState
         return AllNodes
             .Where(n => GetNodeHealth(n.NodeId).Status != NodeHealthStatus.Dead)
             .ToList();
+    }
+
+    public NodeInfo GetLeaderNode()
+    {
+        var leader = AllNodes.FirstOrDefault(n => n.NodeId == _leaderNodeId);
+        return leader
+            ?? throw new InvalidOperationException(
+                $"Leader node '{_leaderNodeId}' is not present in cluster node list."
+            );
+    }
+
+    private void MaybePromoteLeader(string nodeId, NodeHealth health)
+    {
+        if (!_options.Enabled || nodeId != _leaderNodeId || health.Status != NodeHealthStatus.Dead)
+        {
+            return;
+        }
+
+        lock (_leaderLock)
+        {
+            if (_leaderNodeId != nodeId)
+            {
+                return;
+            }
+
+            // Require majority quorum of non-Dead nodes before promoting a new leader
+            var totalNodes = AllNodes.Count;
+            var healthyCount = AllNodes.Count(n =>
+                GetNodeHealth(n.NodeId).Status != NodeHealthStatus.Dead
+            );
+            var requiredQuorum = (totalNodes / 2) + 1;
+
+            if (healthyCount < requiredQuorum)
+            {
+                _logger.LogWarning(
+                    "Leader {OldLeader} is dead but quorum not met for promotion ({Healthy}/{Required} of {Total} nodes). Skipping leader change.",
+                    nodeId,
+                    healthyCount,
+                    requiredQuorum,
+                    totalNodes
+                );
+                return;
+            }
+
+            var nextLeader = AllNodes
+                .Where(n => GetNodeHealth(n.NodeId).Status != NodeHealthStatus.Dead)
+                .OrderBy(n => n.NodeId, StringComparer.Ordinal)
+                .FirstOrDefault();
+            if (nextLeader == null || nextLeader.NodeId == _leaderNodeId)
+            {
+                return;
+            }
+
+            _leaderNodeId = nextLeader.NodeId;
+            _leaderEpoch++;
+            _logger.LogWarning(
+                "Cluster leader changed from {OldLeader} to {NewLeader} (epoch {Epoch}) due to leader health state {Status}. Quorum: {Healthy}/{Required} of {Total} nodes.",
+                nodeId,
+                _leaderNodeId,
+                _leaderEpoch,
+                health.Status,
+                healthyCount,
+                requiredQuorum,
+                totalNodes
+            );
+        }
     }
 }

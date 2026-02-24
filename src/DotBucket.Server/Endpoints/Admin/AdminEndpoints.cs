@@ -320,7 +320,7 @@ public static class AdminEndpoints
                             NodeId = n.NodeId,
                             Address = n.Address,
                             IsSelf = n.IsSelf,
-                            IsLeader = n.IsLeader,
+                            IsLeader = n.NodeId == clusterState.LeaderNodeId,
                             Status = health.Status.ToString(),
                             LastSeen = health.LastSeen.ToString("O"),
                         };
@@ -332,7 +332,7 @@ public static class AdminEndpoints
                     {
                         Enabled = true,
                         SelfNodeId = clusterState.SelfNodeId,
-                        LeaderNodeId = opts.LeaderNodeId,
+                        LeaderNodeId = clusterState.LeaderNodeId,
                         ReplicationFactor = opts.ReplicationFactor,
                         WriteQuorum = opts.WriteQuorum,
                         ReadQuorum = opts.ReadQuorum,

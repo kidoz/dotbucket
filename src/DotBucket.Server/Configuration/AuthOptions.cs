@@ -9,6 +9,6 @@ public class AuthOptions
 
     public string AdminToken { get; set; } = string.Empty;
     public List<string> AllowedOrigins { get; set; } = new();
-    public string RootAccessKey { get; set; } = "minioadmin";
-    public string RootSecretKey { get; set; } = "minioadmin";
+    public string RootAccessKey { get; set; } = string.Empty;
+    public string RootSecretKey { get; set; } = string.Empty;
 }

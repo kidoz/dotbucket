@@ -2,6 +2,7 @@
 // See LICENSE file in the project root for full license information.
 
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using DotBucket.Server.Configuration;
 using DotBucket.Server.Models;
@@ -13,6 +14,10 @@ namespace DotBucket.Server.Iam;
 public class IamStore(IOptions<StorageOptions> options)
 {
     private readonly string _dbPath = Path.Combine(options.Value.RootPath, "metadata.db");
+    private readonly byte[] _masterKey = ParseMasterKey(options.Value.MasterKey);
+    private const string EncryptedSecretPrefix = "enc:v1:";
+    private const int NonceSizeBytes = 12;
+    private const int TagSizeBytes = 16;
 
     private async Task<SqliteConnection> OpenConnectionAsync(CancellationToken ct = default)
     {
@@ -116,6 +121,7 @@ public class IamStore(IOptions<StorageOptions> options)
     )
     {
         var now = DateTime.UtcNow;
+        var encryptedSecretKey = ProtectSecret(secretKey);
         using var conn = await OpenConnectionAsync(ct);
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
@@ -123,7 +129,7 @@ public class IamStore(IOptions<StorageOptions> options)
                 VALUES ($ak, $sk, $user, 'active', $created)
             """;
         cmd.Parameters.AddWithValue("$ak", accessKey);
-        cmd.Parameters.AddWithValue("$sk", secretKey);
+        cmd.Parameters.AddWithValue("$sk", encryptedSecretKey);
         cmd.Parameters.AddWithValue("$user", userName);
         cmd.Parameters.AddWithValue("$created", now.ToString("O"));
         await cmd.ExecuteNonQueryAsync(ct);
@@ -149,7 +155,19 @@ public class IamStore(IOptions<StorageOptions> options)
         cmd.Parameters.AddWithValue("$user", userName);
         using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
-            keys.Add(MapAccessKey(reader));
+        {
+            var key = MapAccessKey(reader);
+            keys.Add(
+                new IamAccessKey
+                {
+                    AccessKey = key.AccessKey,
+                    SecretKey = TryUnprotectSecret(key.SecretKey) ?? string.Empty,
+                    UserName = key.UserName,
+                    Status = key.Status,
+                    CreatedAt = key.CreatedAt,
+                }
+            );
+        }
         return keys;
     }
 
@@ -190,8 +208,13 @@ public class IamStore(IOptions<StorageOptions> options)
                 WHERE ak.access_key = $ak AND ak.status = 'active' AND u.status = 'enabled'
             """;
         cmd.Parameters.AddWithValue("$ak", accessKey);
-        var result = await cmd.ExecuteScalarAsync(ct);
-        return result as string;
+        var storedSecret = await cmd.ExecuteScalarAsync(ct) as string;
+        if (storedSecret == null)
+        {
+            return null;
+        }
+
+        return TryUnprotectSecret(storedSecret);
     }
 
     public async Task<string?> LookupUserNameByAccessKeyAsync(
@@ -558,6 +581,84 @@ public class IamStore(IOptions<StorageOptions> options)
             Status = reader.GetString(3),
             CreatedAt = DateTime.Parse(reader.GetString(4)),
         };
+
+    private string ProtectSecret(string secret)
+    {
+        var plaintext = Encoding.UTF8.GetBytes(secret);
+        var nonce = RandomNumberGenerator.GetBytes(NonceSizeBytes);
+        var ciphertext = new byte[plaintext.Length];
+        var tag = new byte[TagSizeBytes];
+
+        using var aes = new AesGcm(_masterKey, TagSizeBytes);
+        aes.Encrypt(nonce, plaintext, ciphertext, tag);
+
+        var payload = new byte[nonce.Length + tag.Length + ciphertext.Length];
+        Buffer.BlockCopy(nonce, 0, payload, 0, nonce.Length);
+        Buffer.BlockCopy(tag, 0, payload, nonce.Length, tag.Length);
+        Buffer.BlockCopy(ciphertext, 0, payload, nonce.Length + tag.Length, ciphertext.Length);
+        return EncryptedSecretPrefix + Convert.ToBase64String(payload);
+    }
+
+    private string? TryUnprotectSecret(string storedSecret)
+    {
+        try
+        {
+            if (!storedSecret.StartsWith(EncryptedSecretPrefix, StringComparison.Ordinal))
+            {
+                return storedSecret;
+            }
+
+            var payload = Convert.FromBase64String(storedSecret[EncryptedSecretPrefix.Length..]);
+            if (payload.Length < NonceSizeBytes + TagSizeBytes)
+            {
+                return null;
+            }
+
+            var nonce = payload.AsSpan(0, NonceSizeBytes);
+            var tag = payload.AsSpan(NonceSizeBytes, TagSizeBytes);
+            var ciphertext = payload.AsSpan(NonceSizeBytes + TagSizeBytes);
+            var plaintext = new byte[ciphertext.Length];
+
+            using var aes = new AesGcm(_masterKey, TagSizeBytes);
+            aes.Decrypt(nonce, ciphertext, tag, plaintext);
+            return Encoding.UTF8.GetString(plaintext);
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+        catch (CryptographicException)
+        {
+            return null;
+        }
+    }
+
+    private static byte[] ParseMasterKey(string masterKey)
+    {
+        if (string.IsNullOrWhiteSpace(masterKey))
+        {
+            throw new ArgumentException(
+                "Storage master key must be configured for IAM secret encryption."
+            );
+        }
+
+        byte[] decoded;
+        try
+        {
+            decoded = Convert.FromBase64String(masterKey);
+        }
+        catch (FormatException ex)
+        {
+            throw new ArgumentException("Storage master key must be valid base64.", ex);
+        }
+
+        if (decoded.Length != 32)
+        {
+            throw new ArgumentException("Storage master key must be exactly 32 bytes.");
+        }
+
+        return decoded;
+    }
 
     private static IamPolicy MapPolicy(SqliteDataReader reader) =>
         new()

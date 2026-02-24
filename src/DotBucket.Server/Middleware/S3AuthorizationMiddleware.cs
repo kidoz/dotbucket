@@ -17,13 +17,24 @@ public class S3AuthorizationMiddleware(
 {
     public async Task InvokeAsync(HttpContext context, PolicyEngine policyEngine)
     {
-        // If no access key was set by auth middleware, pass through (anonymous or unauthenticated)
+        // If no access key was set by auth middleware, deny unless this is a
+        // SPA pass-through (S3AuthMiddleware set S3AuthSkipped for the root path).
         if (
             !context.Items.TryGetValue("AccessKey", out var accessKeyObj)
             || accessKeyObj is not string accessKey
         )
         {
-            await next(context);
+            if (context.Items.ContainsKey("S3AuthSkipped"))
+            {
+                await next(context);
+                return;
+            }
+
+            logger.LogWarning(
+                "Unauthenticated request to {Path} reached authorization middleware",
+                context.Request.Path
+            );
+            await S3ErrorResponses.AccessDeniedAsync(context);
             return;
         }
 

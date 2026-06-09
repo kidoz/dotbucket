@@ -215,4 +215,4 @@ Planned features to broaden S3 compatibility and enterprise deployment support:
 
 ## License
 
-[MIT](LICENSE) -- Copyright (c) 2026 Aleksandr Pavlov <ckidoz@gmail.com>
+[MIT](LICENSE)

@@ -199,6 +199,20 @@ DotBucket is built around the `IStorageEngine` interface, allowing it to seamles
 └── another-bucket/
 ```
 
+## Roadmap
+
+Planned features to broaden S3 compatibility and enterprise deployment support:
+
+- **Virtual-Hosted Style URLs** -- Support bucket-as-hostname addressing (`bucket.host/key`), not only path-style.
+- **Bucket Provisioning** -- Support bucket creation from configuration at startup.
+- **Region & Signing Region** -- Accept arbitrary region and a custom signing region.
+- **Base Prefix Support** -- Store objects under configurable bucket prefixes.
+- **HTTPS + Custom CA** -- Support HTTPS with enterprise/self-signed certificate authorities.
+- **Lifecycle / Expiration Policies** -- Support automatic cleanup for temporary buckets.
+- **Multipart Upload Tuning** -- Verify compatibility with configurable multipart upload size and concurrency.
+- **Object Versioning** -- Support object versioning for buckets and stored artifacts.
+- **Access Keys + Optional Session Token Mode** -- Support static access keys and behavior without session tokens.
+
 ## License
 
 [MIT](LICENSE) -- Copyright (c) 2026 Aleksandr Pavlov <ckidoz@gmail.com>

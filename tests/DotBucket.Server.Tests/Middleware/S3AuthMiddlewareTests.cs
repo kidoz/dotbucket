@@ -3,7 +3,7 @@
 
 using DotBucket.Server.Auth;
 using DotBucket.Server.Middleware;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using NSubstitute;

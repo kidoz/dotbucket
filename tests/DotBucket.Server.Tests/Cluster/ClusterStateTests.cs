@@ -3,7 +3,7 @@
 
 using DotBucket.Server.Cluster;
 using DotBucket.Server.Configuration;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NSubstitute;

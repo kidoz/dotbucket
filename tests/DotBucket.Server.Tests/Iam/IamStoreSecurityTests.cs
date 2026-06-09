@@ -5,7 +5,7 @@ using DotBucket.Server.Configuration;
 using DotBucket.Server.Iam;
 using DotBucket.Server.Services;
 using DotBucket.Server.Storage;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;

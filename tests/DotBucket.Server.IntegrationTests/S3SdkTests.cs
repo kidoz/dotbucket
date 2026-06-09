@@ -4,7 +4,7 @@
 using Amazon.S3;
 using Amazon.S3.Model;
 using DotBucket.Server.Auth;
-using FluentAssertions;
+using AwesomeAssertions;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;

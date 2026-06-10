@@ -19,4 +19,17 @@ public class StorageOptions
     /// Base64 encoded 32-byte master key for SSE-S3 encryption.
     /// </summary>
     public string MasterKey { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Optional storage-layout prefix. When set, all bucket data is stored under
+    /// "{RootPath}/{BasePrefix}/...". The metadata database remains at the RootPath
+    /// root. Useful for namespacing multiple tenants/instances under a shared root.
+    /// </summary>
+    public string BasePrefix { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Buffer size, in bytes, used when streaming multipart upload parts to and from
+    /// disk. Larger values improve throughput for large parts. Defaults to 80 KiB.
+    /// </summary>
+    public int MultipartBufferSizeBytes { get; set; } = 81920;
 }

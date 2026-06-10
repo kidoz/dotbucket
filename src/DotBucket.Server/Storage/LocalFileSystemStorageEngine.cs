@@ -15,8 +15,10 @@ namespace DotBucket.Server.Storage;
 public class LocalFileSystemStorageEngine : IStorageEngine
 {
     private readonly string _rootPath;
+    private readonly string _dataRoot;
     private readonly string _dbPath;
     private readonly byte[] _masterKey;
+    private readonly int _multipartBufferSize;
     private readonly NotificationDispatcher _dispatcher;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _writeLocks = new();
 
@@ -39,9 +41,21 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             );
         }
         _masterKey = Convert.FromBase64String(options.Value.MasterKey);
+        _multipartBufferSize =
+            options.Value.MultipartBufferSizeBytes > 0
+                ? options.Value.MultipartBufferSizeBytes
+                : 81920;
 
         if (!Directory.Exists(_rootPath))
             Directory.CreateDirectory(_rootPath);
+
+        // Bucket data is stored under an optional base prefix; the metadata DB stays at root.
+        var basePrefix = options.Value.BasePrefix;
+        _dataRoot = string.IsNullOrWhiteSpace(basePrefix)
+            ? _rootPath
+            : Path.Combine(_rootPath, basePrefix);
+        if (!Directory.Exists(_dataRoot))
+            Directory.CreateDirectory(_dataRoot);
 
         _dbPath = Path.Combine(_rootPath, "metadata.db");
         _dispatcher = dispatcher;
@@ -1277,7 +1291,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             )
         )
         {
-            var buffer = new byte[8192];
+            var buffer = new byte[_multipartBufferSize];
             int read;
             while (
                 (read = await content.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0
@@ -1390,7 +1404,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                             FileMode.Open,
                             FileAccess.Read
                         );
-                        var buffer = new byte[8192];
+                        var buffer = new byte[_multipartBufferSize];
                         int read;
                         while (
                             (
@@ -1494,7 +1508,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
 
     private string GetBucketPath(string bucketName)
     {
-        var path = Path.GetFullPath(Path.Combine(_rootPath, bucketName));
+        var path = Path.GetFullPath(Path.Combine(_dataRoot, bucketName));
         EnsureWithinRoot(path);
         return path;
     }
@@ -1504,14 +1518,14 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         var safeKey = objectKey.Replace('/', Path.DirectorySeparatorChar);
         if (versionId != "null")
             safeKey += "." + versionId;
-        var path = Path.GetFullPath(Path.Combine(_rootPath, bucketName, safeKey));
+        var path = Path.GetFullPath(Path.Combine(_dataRoot, bucketName, safeKey));
         EnsureWithinRoot(path);
         return path;
     }
 
     private string GetPartsPath(string bucketName, string uploadId)
     {
-        var path = Path.GetFullPath(Path.Combine(_rootPath, bucketName, ".uploads", uploadId));
+        var path = Path.GetFullPath(Path.Combine(_dataRoot, bucketName, ".uploads", uploadId));
         EnsureWithinRoot(path);
         return path;
     }

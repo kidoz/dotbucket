@@ -77,6 +77,7 @@ else
 builder.Services.AddSingleton<IamStore>();
 builder.Services.AddSingleton<PolicyEngine>();
 builder.Services.AddSingleton<IamSeeder>();
+builder.Services.AddSingleton<BucketSeeder>();
 builder.Services.AddSingleton<ICredentialStore, ConfigurableCredentialStore>();
 builder.Services.AddSingleton<ISigV4Authenticator, SigV4Authenticator>();
 builder.Services.AddScoped<AdminTokenEndpointFilter>();
@@ -257,5 +258,9 @@ _ = app.Services.GetRequiredService<IStorageEngine>();
 // Seed IAM (built-in policies + config credential migration)
 var seeder = app.Services.GetRequiredService<IamSeeder>();
 await seeder.SeedAsync();
+
+// Provision buckets declared in configuration
+var bucketSeeder = app.Services.GetRequiredService<BucketSeeder>();
+await bucketSeeder.SeedAsync();
 
 await app.RunAsync();

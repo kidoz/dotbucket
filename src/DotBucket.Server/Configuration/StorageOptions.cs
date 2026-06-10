@@ -32,4 +32,27 @@ public class StorageOptions
     /// disk. Larger values improve throughput for large parts. Defaults to 80 KiB.
     /// </summary>
     public int MultipartBufferSizeBytes { get; set; } = 81920;
+
+    /// <summary>
+    /// Buckets to create automatically at startup (idempotent provisioning).
+    /// </summary>
+    public List<BucketSeed> Buckets { get; set; } = new();
+
+    /// <summary>
+    /// Declarative description of a bucket to provision at startup.
+    /// </summary>
+    public class BucketSeed
+    {
+        public string Name { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Optional versioning state to apply: "Enabled" or "Suspended".
+        /// </summary>
+        public string? Versioning { get; set; }
+
+        /// <summary>
+        /// When true, the bucket is created with Object Lock enabled.
+        /// </summary>
+        public bool ObjectLock { get; set; }
+    }
 }

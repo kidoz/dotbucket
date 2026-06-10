@@ -11,6 +11,7 @@ using DotBucket.Server.Middleware;
 using DotBucket.Server.Models;
 using DotBucket.Server.Services;
 using DotBucket.Server.Storage;
+using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -66,6 +67,17 @@ if (clusterConfig?.Enabled == true)
     builder.Services.AddSingleton<NodeClient>();
     builder.Services.AddHostedService<HealthMonitorService>();
     builder.Services.AddSingleton<IStorageEngine, DistributedStorageEngine>();
+
+    // Inter-node HTTP client. When a trusted CA bundle is configured, validate peer
+    // certificates against that custom root (for private/enterprise CAs); otherwise
+    // the default OS trust store is used.
+    builder
+        .Services.AddHttpClient("ClusterNode")
+        .ConfigurePrimaryHttpMessageHandler(sp =>
+            ClusterHttpClientFactory.CreateHandler(
+                sp.GetRequiredService<IOptions<ClusterOptions>>().Value
+            )
+        );
 }
 else
 {

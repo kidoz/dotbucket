@@ -19,6 +19,12 @@ public class ClusterOptions
     public int HealthCheckTimeoutMs { get; set; } = 2000;
     public List<NodeEntry> Nodes { get; set; } = new();
 
+    /// <summary>
+    /// Optional path to a PEM bundle of CA certificate(s) to trust for inter-node
+    /// HTTPS calls. When empty, the OS/default trust store is used.
+    /// </summary>
+    public string TrustedCaBundlePath { get; set; } = string.Empty;
+
     public class NodeEntry
     {
         public string NodeId { get; set; } = string.Empty;

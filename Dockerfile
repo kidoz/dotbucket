@@ -45,6 +45,11 @@ RUN apk add --no-cache curl
 EXPOSE 9000
 ENV ASPNETCORE_HTTP_PORTS=9000
 
+# Optional HTTPS endpoint. To enable, mount a cert at /certs, configure
+# Kestrel:Endpoints:Https (see README "HTTPS" section), and set:
+#   ENV ASPNETCORE_HTTPS_PORTS=9443
+# EXPOSE 9443
+
 # Create a default storage directory for the container
 RUN mkdir -p /data && chown -R 1000:1000 /data
 ENV Storage__RootPath=/data

@@ -1,5 +1,8 @@
 # DotBucket
 
+> **⚠️ STATUS: EXPERIMENTAL**  
+> This project is in an early, experimental stage. It is under active development, and features, APIs, and the storage format are subject to breaking changes without notice. It is **not** recommended for production use.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![.NET 10](https://img.shields.io/badge/.NET-10.0-purple.svg)](https://dotnet.microsoft.com/)
 
@@ -7,13 +10,15 @@
 
 ## Features
 
-- **S3 API Compatibility** -- Core S3 operations (PUT, GET, DELETE, LIST) with path-style access. Works with AWS SDK, Boto3, MinIO Client, and other standard S3 tools.
+- **S3 API Compatibility** -- Core S3 operations (PUT, GET, DELETE, LIST) with path-style **and** virtual-hosted-style access. Works with AWS SDK, Boto3, MinIO Client, and other standard S3 tools.
 - **MIT Licensed** -- No AGPLv3 restrictions. No commercial license required. Ever.
 - **High Performance** -- .NET 10, C# 14, Native AOT compilation. Zero external NuGet dependencies.
 - **Built-in Admin Dashboard** -- React-based web UI to manage buckets and objects.
-- **AWS SigV4 Authentication** -- Full AWS Signature Version 4 (AWS4-HMAC-SHA256) support.
+- **AWS SigV4 Authentication** -- Full AWS Signature Version 4 (AWS4-HMAC-SHA256) support, with static access keys and configurable session-token handling.
+- **Flexible Addressing & Regions** -- Path-style and virtual-hosted-style URLs; configurable advertised region and optional strict signing-region enforcement.
 - **Extensible Storage** -- Pluggable `IStorageEngine` interface. Ships with a robust local filesystem backend (SQLite metadata + atomic FS writes) and is architecturally ready for distributed storage via Rendezvous Hashing.
-- **Advanced S3 Features** -- Supports Multipart Uploads, Object Versioning, Object Locking (Retention & Legal Hold), and Server-Side Encryption (AES256).
+- **Advanced S3 Features** -- Supports Multipart Uploads (tunable buffering), Object Versioning, Object Locking (Retention & Legal Hold), Lifecycle/Expiration policies, and Server-Side Encryption (AES256).
+- **Deployment Friendly** -- Provision buckets from configuration at startup, configurable storage base prefix, in-process HTTPS via Kestrel endpoints (enterprise/self-signed CA), and custom-CA trust for inter-node calls.
 - **Docker Ready** -- Multi-stage Alpine image, runs as non-root on port 9000.
 
 ## Tech Stack
@@ -86,7 +91,7 @@ If you have `just` installed, you can use the following commands:
 
 ## S3 API Reference
 
-All endpoints use **path-style** access (`/{bucket}/{key}`).
+Endpoints support **path-style** access (`/{bucket}/{key}`) and, when `S3:VirtualHostedStyle` is enabled, **virtual-hosted-style** (`bucket.{domain}/{key}`).
 
 | Operation | Method | Route | Description |
 |---|---|---|---|
@@ -139,11 +144,40 @@ A health check endpoint is also available at `GET /health` (no authentication re
 |---|---|---|
 | `Storage:RootPath` | `storage` | Root directory for bucket and object storage |
 | `Storage:MasterKey` | `""` (required) | Base64-encoded 32-byte key for server-side encryption |
+| `Storage:BasePrefix` | `""` | Optional sub-path under `RootPath` for all bucket data (metadata DB stays at root) |
+| `Storage:MultipartBufferSizeBytes` | `81920` | Stream buffer size for multipart upload part I/O |
+| `Storage:Buckets` | `[]` | Buckets to provision at startup, e.g. `[{ "Name": "data", "Versioning": "Enabled" }]` |
 | `Auth:AdminToken` | `""` (required) | Bearer token for Admin API and Dashboard access |
 | `Auth:RootAccessKey` | `""` (required) | Root S3 access key |
 | `Auth:RootSecretKey` | `""` (required) | Root S3 secret key |
+| `Auth:SessionTokenMode` | `Ignore` | `Ignore` accepts static keys regardless of `x-amz-security-token`; `Reject` denies token-bearing requests |
+| `S3:Region` | `us-east-1` | Region advertised in `GetBucketLocation` and `x-amz-bucket-region` |
+| `S3:StrictSigningRegion` | `false` | When `true`, only requests signed for `S3:Region` are accepted |
+| `S3:VirtualHostedStyle` | `false` | Enable bucket-as-hostname addressing for the configured `S3:Domains` |
+| `S3:Domains` | `[]` | Base domains carrying bucket subdomains, e.g. `["s3.example.com"]` |
+| `Lifecycle:Enabled` | `true` | Enable the background object-expiration worker |
+| `Lifecycle:ScanIntervalSeconds` | `3600` | Interval between lifecycle expiration scans |
+| `Cluster:TrustedCaBundlePath` | `""` | PEM CA bundle to trust for inter-node HTTPS (empty = OS trust store) |
 
 Configuration can be set via `appsettings.json`, environment variables (`Storage__RootPath`, `Auth__AdminToken`), or command-line arguments.
+
+### HTTPS
+
+DotBucket serves HTTP by default. To terminate TLS in-process (e.g. with an enterprise-CA certificate), configure the built-in ASP.NET Core `Kestrel:Endpoints` section — no code changes required:
+
+```json
+"Kestrel": {
+  "Endpoints": {
+    "Http":  { "Url": "http://0.0.0.0:9000" },
+    "Https": {
+      "Url": "https://0.0.0.0:9443",
+      "Certificate": { "Path": "/certs/server-fullchain.pem", "KeyPath": "/certs/server.key" }
+    }
+  }
+}
+```
+
+Use a full-chain PEM (leaf + intermediates) so enterprise-CA chains validate on clients, or a PFX via `Certificate:Path` + `Certificate:Password`. In containers, set `ASPNETCORE_HTTPS_PORTS=9443`. For clusters, point `Cluster:TrustedCaBundlePath` at a CA bundle to trust private CAs on inter-node HTTPS calls.
 
 ### Credentials (for S3 API)
 
@@ -200,18 +234,11 @@ DotBucket is built around the `IStorageEngine` interface, allowing it to seamles
 ```
 
 ## Roadmap
+[07_Change_Log.md](../../Documents/LIFEOS_Tech_Spec_AI_Architecture_Costs_MobileFirst/07_Change_Log.md)
+Planned / future work:
 
-Planned features to broaden S3 compatibility and enterprise deployment support:
-
-- **Virtual-Hosted Style URLs** -- Support bucket-as-hostname addressing (`bucket.host/key`), not only path-style.
-- **Bucket Provisioning** -- Support bucket creation from configuration at startup.
-- **Region & Signing Region** -- Accept arbitrary region and a custom signing region.
-- **Base Prefix Support** -- Store objects under configurable bucket prefixes.
-- **HTTPS + Custom CA** -- Support HTTPS with enterprise/self-signed certificate authorities.
-- **Lifecycle / Expiration Policies** -- Support automatic cleanup for temporary buckets.
-- **Multipart Upload Tuning** -- Verify compatibility with configurable multipart upload size and concurrency.
-- **Object Versioning** -- Support object versioning for buckets and stored artifacts.
-- **Access Keys + Optional Session Token Mode** -- Support static access keys and behavior without session tokens.
+- Noncurrent-version expiration and `AbortIncompleteMultipartUpload` lifecycle actions.
+- Cluster-wide lifecycle expiration (currently single-node).
 
 ## License
 

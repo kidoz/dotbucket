@@ -45,6 +45,7 @@ public record AdminVersioningResponse(string Status);
 [JsonSerializable(typeof(List<NotificationConfiguration>))]
 [JsonSerializable(typeof(S3Event))]
 [JsonSerializable(typeof(AuthOptions))]
+[JsonSerializable(typeof(S3Options))]
 [JsonSerializable(typeof(ClusterOptions))]
 [JsonSerializable(typeof(ClusterOptions.NodeEntry))]
 [JsonSerializable(typeof(List<ClusterOptions.NodeEntry>))]

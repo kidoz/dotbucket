@@ -48,6 +48,9 @@ builder.Services.Configure<StorageOptions>(
     builder.Configuration.GetSection(StorageOptions.SectionName)
 );
 
+// Configure S3 addressing/region options
+builder.Services.Configure<S3Options>(builder.Configuration.GetSection(S3Options.SectionName));
+
 // Configure Cluster
 builder.Services.Configure<ClusterOptions>(
     builder.Configuration.GetSection(ClusterOptions.SectionName)
@@ -146,6 +149,9 @@ app.UseWhen(
     appBuilder =>
     {
         appBuilder.UseMiddleware<S3AuthMiddleware>();
+        // Runs AFTER signature verification so rewriting the path to inject the bucket
+        // (for virtual-hosted-style requests) cannot invalidate the SigV4 signature.
+        appBuilder.UseMiddleware<VirtualHostMiddleware>();
         appBuilder.UseMiddleware<S3AuthorizationMiddleware>();
     }
 );

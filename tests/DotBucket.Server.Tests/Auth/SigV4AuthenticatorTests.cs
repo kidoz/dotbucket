@@ -5,9 +5,11 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using DotBucket.Server.Auth;
+using DotBucket.Server.Configuration;
 using AwesomeAssertions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NSubstitute;
 
 namespace DotBucket.Server.Tests.Auth;
@@ -27,7 +29,12 @@ public class SigV4AuthenticatorTests
 
     public SigV4AuthenticatorTests()
     {
-        _sut = new SigV4Authenticator(_credentialStore, _logger);
+        _sut = new SigV4Authenticator(
+            _credentialStore,
+            Options.Create(new S3Options()),
+            Options.Create(new AuthOptions()),
+            _logger
+        );
     }
 
     [Fact]
@@ -188,6 +195,112 @@ public class SigV4AuthenticatorTests
 
         // Assert
         result.Should().BeFalse();
+    }
+
+    private SigV4Authenticator CreateSut(S3Options? s3 = null, AuthOptions? auth = null) =>
+        new(
+            _credentialStore,
+            Options.Create(s3 ?? new S3Options()),
+            Options.Create(auth ?? new AuthOptions()),
+            _logger
+        );
+
+    [Fact]
+    public async Task AuthenticateAsync_ReturnsFalse_WhenStrictRegionMismatch()
+    {
+        var dateTime = DateTime.UtcNow;
+        var body = Array.Empty<byte>();
+        var context = CreateSignedContext(
+            HttpMethod.Get,
+            "/test-bucket",
+            ComputeSha256Hex(body),
+            body,
+            dateTime
+        );
+        _credentialStore
+            .GetSecretKeyAsync(TestAccessKey, Arg.Any<CancellationToken>())
+            .Returns(TestSecretKey);
+
+        // Signed region is us-east-1; configured strict region is eu-west-1.
+        var sut = CreateSut(
+            s3: new S3Options { StrictSigningRegion = true, Region = "eu-west-1" }
+        );
+
+        var result = await sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
+
+        result.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task AuthenticateAsync_ReturnsTrue_WhenStrictRegionMatches()
+    {
+        var dateTime = DateTime.UtcNow;
+        var body = Array.Empty<byte>();
+        var context = CreateSignedContext(
+            HttpMethod.Get,
+            "/test-bucket",
+            ComputeSha256Hex(body),
+            body,
+            dateTime
+        );
+        _credentialStore
+            .GetSecretKeyAsync(TestAccessKey, Arg.Any<CancellationToken>())
+            .Returns(TestSecretKey);
+
+        var sut = CreateSut(
+            s3: new S3Options { StrictSigningRegion = true, Region = TestRegion }
+        );
+
+        var result = await sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
+
+        result.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task AuthenticateAsync_RejectsSessionToken_WhenModeIsReject()
+    {
+        var dateTime = DateTime.UtcNow;
+        var body = Array.Empty<byte>();
+        var context = CreateSignedContext(
+            HttpMethod.Get,
+            "/test-bucket",
+            ComputeSha256Hex(body),
+            body,
+            dateTime
+        );
+        context.Request.Headers["x-amz-security-token"] = "FQoGZ...token";
+        _credentialStore
+            .GetSecretKeyAsync(TestAccessKey, Arg.Any<CancellationToken>())
+            .Returns(TestSecretKey);
+
+        var sut = CreateSut(auth: new AuthOptions { SessionTokenMode = "Reject" });
+
+        var result = await sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
+
+        result.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task AuthenticateAsync_IgnoresSessionToken_ByDefault()
+    {
+        var dateTime = DateTime.UtcNow;
+        var body = Array.Empty<byte>();
+        var context = CreateSignedContext(
+            HttpMethod.Get,
+            "/test-bucket",
+            ComputeSha256Hex(body),
+            body,
+            dateTime
+        );
+        context.Request.Headers["x-amz-security-token"] = "FQoGZ...token";
+        _credentialStore
+            .GetSecretKeyAsync(TestAccessKey, Arg.Any<CancellationToken>())
+            .Returns(TestSecretKey);
+
+        // Default mode "Ignore": the (unsigned) token header is present but tolerated.
+        var result = await _sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
+
+        result.Should().BeTrue();
     }
 
     // ========================================================================

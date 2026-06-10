@@ -152,6 +152,47 @@ public class S3SdkTests : IClassFixture<WebApplicationFactory<Program>>
         }
     }
 
+    private HttpClient CreateRawClient()
+    {
+        var client = _factory
+            .WithWebHostBuilder(builder =>
+                builder.ConfigureTestServices(services =>
+                    services.AddSingleton<ISigV4Authenticator, AllowAllAuthenticator>()
+                )
+            )
+            .CreateClient();
+        // A triggering auth header so S3AuthMiddleware invokes the (AllowAll) authenticator.
+        client.DefaultRequestHeaders.TryAddWithoutValidation(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=admin/20260101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=test"
+        );
+        return client;
+    }
+
+    [Fact]
+    public async Task BucketLocation_ReturnsConfiguredRegion()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var http = CreateRawClient();
+        var bucket = $"loc-test-{Guid.NewGuid():N}";
+
+        (await http.PutAsync($"/{bucket}", null, ct)).EnsureSuccessStatusCode();
+        try
+        {
+            var resp = await http.GetAsync($"/{bucket}?location", ct);
+            resp.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+            resp.Headers.TryGetValues("x-amz-bucket-region", out var values).Should().BeTrue();
+            values!.Should().Contain("us-east-1");
+
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            body.Should().Contain("LocationConstraint");
+        }
+        finally
+        {
+            await http.DeleteAsync($"/{bucket}", ct);
+        }
+    }
+
     private class UriFixingHandler(HttpClient innerClient) : HttpMessageHandler
     {
         protected override async Task<HttpResponseMessage> SendAsync(

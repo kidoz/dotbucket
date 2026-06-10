@@ -28,6 +28,11 @@ public static class S3Endpoints
 
     private static bool IsReservedBucketName(string bucket) => ReservedPrefixes.Contains(bucket);
 
+    /// <summary>
+    /// Exposes the reserved-bucket-name check for reuse (e.g. virtual-host routing).
+    /// </summary>
+    internal static bool IsReservedBucketNamePublic(string bucket) => IsReservedBucketName(bucket);
+
     private static async Task<IResult> WriteInvalidSseHeaderAsync(HttpContext context)
     {
         await S3ErrorResponses.WriteErrorAsync(
@@ -214,7 +219,12 @@ public static class S3Endpoints
         s3.MapMethods(
             "/{bucket}",
             ["HEAD"],
-            async (string bucket, IStorageEngine storageEngine, HttpContext context) =>
+            async (
+                string bucket,
+                IStorageEngine storageEngine,
+                Microsoft.Extensions.Options.IOptions<DotBucket.Server.Configuration.S3Options> s3Options,
+                HttpContext context
+            ) =>
             {
                 if (IsReservedBucketName(bucket))
                 {
@@ -223,6 +233,7 @@ public static class S3Endpoints
 
                 if (await storageEngine.BucketExistsAsync(bucket, context.RequestAborted))
                 {
+                    context.Response.Headers["x-amz-bucket-region"] = s3Options.Value.Region;
                     context.Response.StatusCode = 200;
                 }
                 else
@@ -269,6 +280,7 @@ public static class S3Endpoints
                 string bucket,
                 string? prefix,
                 IStorageEngine storageEngine,
+                Microsoft.Extensions.Options.IOptions<DotBucket.Server.Configuration.S3Options> s3Options,
                 HttpContext context
             ) =>
             {
@@ -280,6 +292,25 @@ public static class S3Endpoints
                 if (!await storageEngine.BucketExistsAsync(bucket, context.RequestAborted))
                 {
                     await S3ErrorResponses.NoSuchBucketAsync(context);
+                    return Results.Empty;
+                }
+
+                if (context.Request.Query.ContainsKey("location"))
+                {
+                    var region = s3Options.Value.Region;
+                    // S3 convention: us-east-1 is represented by an empty LocationConstraint.
+                    var doc = new XDocument(
+                        new XElement(
+                            S3Ns + "LocationConstraint",
+                            string.Equals(region, "us-east-1", StringComparison.OrdinalIgnoreCase)
+                                ? null
+                                : region
+                        )
+                    );
+
+                    context.Response.Headers["x-amz-bucket-region"] = region;
+                    context.Response.ContentType = "application/xml";
+                    await context.Response.WriteAsync(doc.ToString(), context.RequestAborted);
                     return Results.Empty;
                 }
 

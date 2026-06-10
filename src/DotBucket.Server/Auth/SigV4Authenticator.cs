@@ -5,6 +5,8 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using DotBucket.Server.Configuration;
+using Microsoft.Extensions.Options;
 
 namespace DotBucket.Server.Auth;
 
@@ -13,11 +15,16 @@ namespace DotBucket.Server.Auth;
 /// </summary>
 public class SigV4Authenticator(
     ICredentialStore credentialStore,
+    IOptions<S3Options> s3Options,
+    IOptions<AuthOptions> authOptions,
     ILogger<SigV4Authenticator> logger
 ) : ISigV4Authenticator
 {
     private const string Algorithm = "AWS4-HMAC-SHA256";
     private static readonly TimeSpan MaxClockSkew = TimeSpan.FromMinutes(15);
+
+    private readonly S3Options _s3Options = s3Options.Value;
+    private readonly AuthOptions _authOptions = authOptions.Value;
 
     // Matches 'Credential=.../YYYYMMDD/region/service/aws4_request'
     private static readonly Regex CredentialRegex = new(
@@ -72,6 +79,12 @@ public class SigV4Authenticator(
         var service = matchCred.Groups[4].Value;
         var signedHeadersStr = matchHeaders.Groups[1].Value;
         var providedSignature = matchSig.Groups[1].Value;
+
+        if (!IsRegionAllowed(region))
+            return false;
+
+        if (!IsSessionTokenAllowed(context.Request.Headers.ContainsKey("x-amz-security-token")))
+            return false;
 
         var secretKey = await credentialStore.GetSecretKeyAsync(accessKey, cancellationToken);
         if (string.IsNullOrEmpty(secretKey))
@@ -212,6 +225,12 @@ public class SigV4Authenticator(
         var amzDate = query["X-Amz-Date"].ToString();
         var expiresStr = query["X-Amz-Expires"].ToString();
 
+        if (!IsRegionAllowed(region))
+            return false;
+
+        if (!IsSessionTokenAllowed(query.ContainsKey("X-Amz-Security-Token")))
+            return false;
+
         if (
             string.IsNullOrEmpty(signedHeadersStr)
             || string.IsNullOrEmpty(providedSignature)
@@ -295,6 +314,43 @@ public class SigV4Authenticator(
             accessKey
         );
         context.Items["AccessKey"] = accessKey;
+        return true;
+    }
+
+    /// <summary>
+    /// Rejects the request when StrictSigningRegion is enabled and the credential-scope
+    /// region does not match the configured region.
+    /// </summary>
+    private bool IsRegionAllowed(string region)
+    {
+        if (!_s3Options.StrictSigningRegion)
+            return true;
+
+        if (string.Equals(region, _s3Options.Region, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        logger.LogWarning(
+            "Request signing region '{Region}' does not match configured region '{Configured}'.",
+            region,
+            _s3Options.Region
+        );
+        return false;
+    }
+
+    /// <summary>
+    /// Rejects the request when SessionTokenMode is "Reject" and a session token is present.
+    /// </summary>
+    private bool IsSessionTokenAllowed(bool hasSessionToken)
+    {
+        if (!hasSessionToken)
+            return true;
+
+        if (string.Equals(_authOptions.SessionTokenMode, "Reject", StringComparison.OrdinalIgnoreCase))
+        {
+            logger.LogWarning("Request carries a session token but SessionTokenMode is 'Reject'.");
+            return false;
+        }
+
         return true;
     }
 

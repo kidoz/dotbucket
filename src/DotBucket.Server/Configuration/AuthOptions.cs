@@ -11,4 +11,11 @@ public class AuthOptions
     public List<string> AllowedOrigins { get; set; } = new();
     public string RootAccessKey { get; set; } = string.Empty;
     public string RootSecretKey { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Controls handling of the AWS session token (x-amz-security-token).
+    /// "Ignore" (default) accepts static access keys regardless of a token.
+    /// "Reject" denies any request that carries a session token.
+    /// </summary>
+    public string SessionTokenMode { get; set; } = "Ignore";
 }

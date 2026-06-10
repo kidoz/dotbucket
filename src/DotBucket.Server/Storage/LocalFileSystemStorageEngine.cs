@@ -223,6 +223,20 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             """
         );
 
+        // Migration 6: per-bucket lifecycle/expiration configuration.
+        // Versions 1-5 were used by the original (pre-squash) migration history and may
+        // already be recorded in legacy databases, so this new migration uses version 6.
+        RunMigration(
+            connection,
+            6,
+            """
+                CREATE TABLE IF NOT EXISTS lifecycle (
+                    bucket_name TEXT PRIMARY KEY,
+                    config_json TEXT NOT NULL
+                );
+            """
+        );
+
         CleanupOrphanedTempFiles();
     }
 
@@ -501,6 +515,88 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                 json,
                 StorageObjectJsonContext.Default.ListNotificationConfiguration
             ) ?? new List<NotificationConfiguration>();
+    }
+
+    public async Task SetLifecycleAsync(
+        string bucketName,
+        LifecycleConfiguration config,
+        CancellationToken cancellationToken = default
+    )
+    {
+        using var connection = await OpenConnectionAsync(cancellationToken);
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "INSERT OR REPLACE INTO lifecycle (bucket_name, config_json) VALUES ($bucket, $json)";
+        command.Parameters.AddWithValue("$bucket", bucketName);
+        command.Parameters.AddWithValue(
+            "$json",
+            JsonSerializer.Serialize(config, StorageObjectJsonContext.Default.LifecycleConfiguration)
+        );
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<LifecycleConfiguration?> GetLifecycleAsync(
+        string bucketName,
+        CancellationToken cancellationToken = default
+    )
+    {
+        using var connection = await OpenConnectionAsync(cancellationToken);
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT config_json FROM lifecycle WHERE bucket_name = $bucket";
+        command.Parameters.AddWithValue("$bucket", bucketName);
+        var json = await command.ExecuteScalarAsync(cancellationToken) as string;
+        if (string.IsNullOrEmpty(json))
+            return null;
+        return JsonSerializer.Deserialize(
+            json,
+            StorageObjectJsonContext.Default.LifecycleConfiguration
+        );
+    }
+
+    public async Task DeleteLifecycleAsync(
+        string bucketName,
+        CancellationToken cancellationToken = default
+    )
+    {
+        using var connection = await OpenConnectionAsync(cancellationToken);
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM lifecycle WHERE bucket_name = $bucket";
+        command.Parameters.AddWithValue("$bucket", bucketName);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<IEnumerable<(string Key, string VersionId)>> ListExpiredObjectsAsync(
+        string bucketName,
+        string? prefix,
+        DateTime cutoffUtc,
+        int limit,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var results = new List<(string, string)>();
+        using var connection = await OpenConnectionAsync(cancellationToken);
+        using var command = connection.CreateCommand();
+        var sql =
+            "SELECT object_key, version_id FROM objects "
+            + "WHERE bucket_name = $bucket AND is_latest = 1 AND is_delete_marker = 0 "
+            + "AND last_modified <= $cutoff ";
+        if (!string.IsNullOrEmpty(prefix))
+        {
+            sql += "AND object_key LIKE $prefix ESCAPE '!' ";
+            command.Parameters.AddWithValue("$prefix", EscapeLikePattern(prefix) + "%");
+        }
+        sql += "ORDER BY last_modified ASC LIMIT $limit";
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$bucket", bucketName);
+        command.Parameters.AddWithValue("$cutoff", cutoffUtc.ToString("O"));
+        command.Parameters.AddWithValue("$limit", limit);
+
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add((reader.GetString(0), reader.GetString(1)));
+        }
+        return results;
     }
 
     public Task<StorageObject> PutObjectAsync(
@@ -1124,6 +1220,11 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         delNotifCmd.CommandText = "DELETE FROM notifications WHERE bucket_name = $bucket";
         delNotifCmd.Parameters.AddWithValue("$bucket", bucketName);
         await delNotifCmd.ExecuteNonQueryAsync(cancellationToken);
+        using var delLifecycleCmd = connection.CreateCommand();
+        delLifecycleCmd.Transaction = transaction;
+        delLifecycleCmd.CommandText = "DELETE FROM lifecycle WHERE bucket_name = $bucket";
+        delLifecycleCmd.Parameters.AddWithValue("$bucket", bucketName);
+        await delLifecycleCmd.ExecuteNonQueryAsync(cancellationToken);
         using var delBucketCmd = connection.CreateCommand();
         delBucketCmd.Transaction = transaction;
         delBucketCmd.CommandText = "DELETE FROM buckets WHERE name = $bucket";

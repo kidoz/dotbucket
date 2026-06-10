@@ -201,6 +201,25 @@ public static class S3Endpoints
                     return Results.Ok();
                 }
 
+                if (context.Request.Query.ContainsKey("lifecycle"))
+                {
+                    using var reader = new StreamReader(context.Request.Body);
+                    var xml = await reader.ReadToEndAsync(context.RequestAborted);
+                    LifecycleConfiguration config;
+                    try
+                    {
+                        config = S3LifecycleXml.Parse(xml);
+                    }
+                    catch (Exception ex) when (ex is FormatException or System.Xml.XmlException)
+                    {
+                        await S3ErrorResponses.MalformedXmlAsync(context, ex.Message);
+                        return Results.Empty;
+                    }
+
+                    await storageEngine.SetLifecycleAsync(bucket, config, context.RequestAborted);
+                    return Results.Ok();
+                }
+
                 try
                 {
                     await storageEngine.CreateBucketAsync(bucket, false, context.RequestAborted);
@@ -252,6 +271,13 @@ public static class S3Endpoints
                 if (IsReservedBucketName(bucket))
                 {
                     return Results.NotFound();
+                }
+
+                // DELETE /{bucket}?lifecycle removes the lifecycle config, not the bucket.
+                if (context.Request.Query.ContainsKey("lifecycle"))
+                {
+                    await storageEngine.DeleteLifecycleAsync(bucket, context.RequestAborted);
+                    return Results.NoContent();
                 }
 
                 if (!await storageEngine.BucketExistsAsync(bucket, context.RequestAborted))
@@ -311,6 +337,26 @@ public static class S3Endpoints
                     context.Response.Headers["x-amz-bucket-region"] = region;
                     context.Response.ContentType = "application/xml";
                     await context.Response.WriteAsync(doc.ToString(), context.RequestAborted);
+                    return Results.Empty;
+                }
+
+                if (context.Request.Query.ContainsKey("lifecycle"))
+                {
+                    var config = await storageEngine.GetLifecycleAsync(
+                        bucket,
+                        context.RequestAborted
+                    );
+                    if (config == null || config.Rules.Count == 0)
+                    {
+                        await S3ErrorResponses.NoSuchLifecycleConfigurationAsync(context);
+                        return Results.Empty;
+                    }
+
+                    context.Response.ContentType = "application/xml";
+                    await context.Response.WriteAsync(
+                        S3LifecycleXml.Build(config),
+                        context.RequestAborted
+                    );
                     return Results.Empty;
                 }
 

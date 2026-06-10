@@ -193,6 +193,91 @@ public class S3SdkTests : IClassFixture<WebApplicationFactory<Program>>
         }
     }
 
+    [Fact]
+    public async Task Lifecycle_PutGetDelete_RoundTrips()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var http = CreateRawClient();
+        var bucket = $"lc-test-{Guid.NewGuid():N}";
+        (await http.PutAsync($"/{bucket}", null, ct)).EnsureSuccessStatusCode();
+
+        try
+        {
+            const string ns = "http://s3.amazonaws.com/doc/2006-03-01/";
+            var lifecycleXml =
+                $"""
+                <LifecycleConfiguration xmlns="{ns}">
+                  <Rule>
+                    <ID>temp</ID>
+                    <Filter><Prefix>tmp/</Prefix></Filter>
+                    <Status>Enabled</Status>
+                    <Expiration><Days>7</Days></Expiration>
+                  </Rule>
+                </LifecycleConfiguration>
+                """;
+
+            var put = await http.PutAsync(
+                $"/{bucket}?lifecycle",
+                new StringContent(lifecycleXml, System.Text.Encoding.UTF8, "application/xml"),
+                ct
+            );
+            put.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+
+            var get = await http.GetAsync($"/{bucket}?lifecycle", ct);
+            get.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+            (await get.Content.ReadAsStringAsync(ct)).Should().Contain("<Days>7</Days>");
+
+            var del = await http.DeleteAsync($"/{bucket}?lifecycle", ct);
+            del.StatusCode.Should().Be(System.Net.HttpStatusCode.NoContent);
+
+            var getAfter = await http.GetAsync($"/{bucket}?lifecycle", ct);
+            getAfter.StatusCode.Should().Be(System.Net.HttpStatusCode.NotFound);
+            (await getAfter.Content.ReadAsStringAsync(ct))
+                .Should()
+                .Contain("NoSuchLifecycleConfiguration");
+        }
+        finally
+        {
+            await http.DeleteAsync($"/{bucket}", ct);
+        }
+    }
+
+    [Fact]
+    public async Task Lifecycle_RejectsMalformedRule()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var http = CreateRawClient();
+        var bucket = $"lc-bad-{Guid.NewGuid():N}";
+        (await http.PutAsync($"/{bucket}", null, ct)).EnsureSuccessStatusCode();
+
+        try
+        {
+            const string ns = "http://s3.amazonaws.com/doc/2006-03-01/";
+            // Both Days and Date set => MalformedXML.
+            var bad =
+                $"""
+                <LifecycleConfiguration xmlns="{ns}">
+                  <Rule>
+                    <Status>Enabled</Status>
+                    <Expiration><Days>7</Days><Date>2030-01-01T00:00:00Z</Date></Expiration>
+                  </Rule>
+                </LifecycleConfiguration>
+                """;
+
+            var resp = await http.PutAsync(
+                $"/{bucket}?lifecycle",
+                new StringContent(bad, System.Text.Encoding.UTF8, "application/xml"),
+                ct
+            );
+            resp.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+            (await resp.Content.ReadAsStringAsync(ct)).Should().Contain("MalformedXML");
+        }
+        finally
+        {
+            await http.DeleteAsync($"/{bucket}", ct);
+        }
+    }
+
     private class UriFixingHandler(HttpClient innerClient) : HttpMessageHandler
     {
         protected override async Task<HttpResponseMessage> SendAsync(

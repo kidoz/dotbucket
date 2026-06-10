@@ -420,6 +420,31 @@ public class DistributedStorageEngine(
         CancellationToken cancellationToken = default
     ) => local.GetNotificationsAsync(bucketName, cancellationToken);
 
+    // Lifecycle configuration is local metadata, replicated like bucket metadata.
+    public Task SetLifecycleAsync(
+        string bucketName,
+        LifecycleConfiguration config,
+        CancellationToken cancellationToken = default
+    ) => local.SetLifecycleAsync(bucketName, config, cancellationToken);
+
+    public Task<LifecycleConfiguration?> GetLifecycleAsync(
+        string bucketName,
+        CancellationToken cancellationToken = default
+    ) => local.GetLifecycleAsync(bucketName, cancellationToken);
+
+    public Task DeleteLifecycleAsync(
+        string bucketName,
+        CancellationToken cancellationToken = default
+    ) => local.DeleteLifecycleAsync(bucketName, cancellationToken);
+
+    public Task<IEnumerable<(string Key, string VersionId)>> ListExpiredObjectsAsync(
+        string bucketName,
+        string? prefix,
+        DateTime cutoffUtc,
+        int limit,
+        CancellationToken cancellationToken = default
+    ) => local.ListExpiredObjectsAsync(bucketName, prefix, cutoffUtc, limit, cancellationToken);
+
     // ========================================================================
     // Object writes: write to preference list, wait for WriteQuorum acks
     // ========================================================================

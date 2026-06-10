@@ -44,6 +44,9 @@ builder
     .ConfigurePrimaryHttpMessageHandler(() => NotificationDispatcher.CreateSsrfSafeHandler());
 builder.Services.AddSingleton<NotificationDispatcher>();
 
+// Background lifecycle/expiration worker (self-gates on config + cluster mode)
+builder.Services.AddHostedService<LifecycleExpirationService>();
+
 // Configure Storage Engine
 builder.Services.Configure<StorageOptions>(
     builder.Configuration.GetSection(StorageOptions.SectionName)
@@ -51,6 +54,11 @@ builder.Services.Configure<StorageOptions>(
 
 // Configure S3 addressing/region options
 builder.Services.Configure<S3Options>(builder.Configuration.GetSection(S3Options.SectionName));
+
+// Configure lifecycle/expiration options
+builder.Services.Configure<LifecycleOptions>(
+    builder.Configuration.GetSection(LifecycleOptions.SectionName)
+);
 
 // Configure Cluster
 builder.Services.Configure<ClusterOptions>(

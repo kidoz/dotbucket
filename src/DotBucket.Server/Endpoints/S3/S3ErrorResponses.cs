@@ -66,4 +66,20 @@ public static class S3ErrorResponses
 
     public static Task AccessDeniedAsync(HttpContext context) =>
         WriteErrorAsync(context, 403, "AccessDenied", "Access Denied");
+
+    public static Task NoSuchLifecycleConfigurationAsync(HttpContext context) =>
+        WriteErrorAsync(
+            context,
+            404,
+            "NoSuchLifecycleConfiguration",
+            "The lifecycle configuration does not exist."
+        );
+
+    public static Task MalformedXmlAsync(HttpContext context, string? message = null) =>
+        WriteErrorAsync(
+            context,
+            400,
+            "MalformedXML",
+            message ?? "The XML you provided was not well-formed or did not validate."
+        );
 }

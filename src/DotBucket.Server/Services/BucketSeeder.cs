@@ -32,7 +32,10 @@ public class BucketSeeder(
                 if (!await storageEngine.BucketExistsAsync(seed.Name, ct))
                 {
                     await storageEngine.CreateBucketAsync(seed.Name, seed.ObjectLock, ct);
-                    logger.LogInformation("Provisioned bucket {Bucket} from configuration", seed.Name);
+                    logger.LogInformation(
+                        "Provisioned bucket {Bucket} from configuration",
+                        seed.Name
+                    );
                 }
 
                 if (!string.IsNullOrWhiteSpace(seed.Versioning))

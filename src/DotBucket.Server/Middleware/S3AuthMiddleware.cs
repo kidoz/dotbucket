@@ -14,7 +14,8 @@ public class S3AuthMiddleware(RequestDelegate next, ILogger<S3AuthMiddleware> lo
 {
     public async Task InvokeAsync(HttpContext context, ISigV4Authenticator authenticator)
     {
-        var hasS3Auth = context.Request.Headers.ContainsKey("Authorization")
+        var hasS3Auth =
+            context.Request.Headers.ContainsKey("Authorization")
             || context.Request.Headers.ContainsKey("x-amz-date")
             // Presigned URLs carry auth material in query params.
             || context.Request.Query.ContainsKey("X-Amz-Algorithm");

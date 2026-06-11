@@ -61,7 +61,10 @@ public class LifecycleExpirationService(
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Lifecycle expiration scan pass failed; will retry next interval.");
+                logger.LogError(
+                    ex,
+                    "Lifecycle expiration scan pass failed; will retry next interval."
+                );
             }
         }
     }

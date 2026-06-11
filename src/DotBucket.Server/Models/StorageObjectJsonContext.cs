@@ -12,7 +12,11 @@ public record InternalCreateBucketRequest(string Name);
 
 public record InternalSetVersioningRequest(string Status);
 
-public record InternalSetObjectLockConfigRequest(bool Enabled, string? DefaultRetentionMode, int? DefaultRetentionDays);
+public record InternalSetObjectLockConfigRequest(
+    bool Enabled,
+    string? DefaultRetentionMode,
+    int? DefaultRetentionDays
+);
 
 public record InternalSetObjectRetentionRequest(string Mode, DateTime RetainUntil);
 

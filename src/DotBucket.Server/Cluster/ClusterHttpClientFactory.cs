@@ -23,12 +23,7 @@ public static class ClusterHttpClientFactory
             var customRoots = new X509Certificate2Collection();
             customRoots.ImportFromPemFile(options.TrustedCaBundlePath);
 
-            handler.SslOptions.RemoteCertificateValidationCallback = (
-                _,
-                cert,
-                _,
-                errors
-            ) =>
+            handler.SslOptions.RemoteCertificateValidationCallback = (_, cert, _, errors) =>
             {
                 if (errors == SslPolicyErrors.None)
                     return true;

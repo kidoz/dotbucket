@@ -76,13 +76,19 @@ public static class S3ActionResolver
         {
             "PUT" when query.ContainsKey("versioning") => ("s3:PutBucketVersioning", bucketArn),
             "PUT" when query.ContainsKey("notification") => ("s3:PutBucketNotification", bucketArn),
-            "PUT" when query.ContainsKey("object-lock") => ("s3:PutObjectLockConfiguration", bucketArn),
+            "PUT" when query.ContainsKey("object-lock") => (
+                "s3:PutObjectLockConfiguration",
+                bucketArn
+            ),
             "PUT" => ("s3:CreateBucket", bucketArn),
             "HEAD" => ("s3:ListBucket", bucketArn),
             "DELETE" => ("s3:DeleteBucket", bucketArn),
             "GET" when query.ContainsKey("versioning") => ("s3:GetBucketVersioning", bucketArn),
             "GET" when query.ContainsKey("notification") => ("s3:GetBucketNotification", bucketArn),
-            "GET" when query.ContainsKey("object-lock") => ("s3:GetObjectLockConfiguration", bucketArn),
+            "GET" when query.ContainsKey("object-lock") => (
+                "s3:GetObjectLockConfiguration",
+                bucketArn
+            ),
             "GET" when query.ContainsKey("uploads") => ("s3:ListBucketMultipartUploads", bucketArn),
             "GET" => ("s3:ListBucket", bucketArn),
             "POST" when query.ContainsKey("delete") => ("s3:DeleteObject", bucketArn),

@@ -141,7 +141,11 @@ public class NotificationDispatcher(
                 var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
                 try
                 {
-                    await socket.ConnectAsync(addresses, context.DnsEndPoint.Port, cancellationToken);
+                    await socket.ConnectAsync(
+                        addresses,
+                        context.DnsEndPoint.Port,
+                        cancellationToken
+                    );
                     return new NetworkStream(socket, ownsSocket: true);
                 }
                 catch

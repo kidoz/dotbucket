@@ -4,8 +4,8 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using DotBucket.Server.Models;
 using AwesomeAssertions;
+using DotBucket.Server.Models;
 using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace DotBucket.Server.IntegrationTests;

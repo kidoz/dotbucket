@@ -44,10 +44,7 @@ public class BucketTests : IClassFixture<WebApplicationFactory<Program>>
         request.Headers.TryAddWithoutValidation("x-amz-content-sha256", "UNSIGNED-PAYLOAD");
 
         // Act
-        var response = await client.SendAsync(
-            request,
-            TestContext.Current.CancellationToken
-        );
+        var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
 
         // Assert
         // S3 requests without valid SigV4 credentials should be denied
@@ -62,10 +59,7 @@ public class BucketTests : IClassFixture<WebApplicationFactory<Program>>
         using var request = new HttpRequestMessage(HttpMethod.Put, "/test-bucket-noauth");
 
         // Act
-        var response = await client.SendAsync(
-            request,
-            TestContext.Current.CancellationToken
-        );
+        var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
 
         // Assert — must be rejected, not 200
         response.StatusCode.Should().Be(HttpStatusCode.Forbidden);

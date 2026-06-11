@@ -15,7 +15,7 @@ public static class RoutingConstants
         "favicon.ico",
         "robots.txt",
         "dotbucket-logo.svg",
-        "index.html"
+        "index.html",
     };
 
     public static bool IsReservedPath(string? path)

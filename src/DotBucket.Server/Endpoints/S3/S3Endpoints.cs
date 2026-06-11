@@ -84,7 +84,9 @@ public static class S3Endpoints
                 var read = await stream.ReadAsync(buffer.AsMemory(0, chunkSize), cancellationToken);
                 if (read == 0)
                 {
-                    throw new EndOfStreamException("Unexpected end of stream while applying range.");
+                    throw new EndOfStreamException(
+                        "Unexpected end of stream while applying range."
+                    );
                 }
 
                 remaining -= read;

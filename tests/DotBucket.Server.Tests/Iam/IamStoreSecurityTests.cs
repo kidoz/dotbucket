@@ -1,16 +1,16 @@
 // Licensed under the MIT License.
 // See LICENSE file in the project root for full license information.
 
+using System.Security.Cryptography;
+using AwesomeAssertions;
 using DotBucket.Server.Configuration;
 using DotBucket.Server.Iam;
 using DotBucket.Server.Services;
 using DotBucket.Server.Storage;
-using AwesomeAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NSubstitute;
-using System.Security.Cryptography;
 
 namespace DotBucket.Server.Tests.Iam;
 
@@ -26,11 +26,7 @@ public class IamStoreSecurityTests
         {
             var masterKey = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
             var storageOptions = Options.Create(
-                new StorageOptions
-                {
-                    RootPath = rootPath,
-                    MasterKey = masterKey,
-                }
+                new StorageOptions { RootPath = rootPath, MasterKey = masterKey }
             );
 
             var httpClientFactory = Substitute.For<IHttpClientFactory>();
@@ -57,7 +53,8 @@ public class IamStoreSecurityTests
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT secret_key FROM iam_access_keys WHERE access_key = $ak";
             cmd.Parameters.AddWithValue("$ak", "AKIA_TEST_1234567890");
-            var storedSecret = (string)(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken))!;
+            var storedSecret = (string)
+                (await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken))!;
 
             storedSecret.Should().NotBe("secret-plaintext-value");
             storedSecret.Should().StartWith("enc:v1:");

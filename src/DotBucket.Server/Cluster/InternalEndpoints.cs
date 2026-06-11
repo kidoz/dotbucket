@@ -29,7 +29,9 @@ public static class InternalEndpoints
                 var contentType = request.ContentType ?? "application/octet-stream";
 
                 // Extract replica version ID for consistent versioning across nodes
-                string? replicaVersionId = request.Headers["X-DotBucket-VersionId"].FirstOrDefault();
+                string? replicaVersionId = request
+                    .Headers["X-DotBucket-VersionId"]
+                    .FirstOrDefault();
 
                 // Extract encryption flag
                 string? encryption = request.Headers["X-DotBucket-Encryption"].FirstOrDefault();

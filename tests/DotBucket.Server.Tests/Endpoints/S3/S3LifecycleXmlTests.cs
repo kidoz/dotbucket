@@ -13,8 +13,7 @@ public class S3LifecycleXmlTests
     [Fact]
     public void Parse_DaysRule_WithFilterPrefix()
     {
-        var xml =
-            $"""
+        var xml = $"""
             <LifecycleConfiguration xmlns="{Ns}">
               <Rule>
                 <ID>temp</ID>
@@ -39,8 +38,7 @@ public class S3LifecycleXmlTests
     [Fact]
     public void Parse_LegacyTopLevelPrefix_AndDisabledStatus()
     {
-        var xml =
-            $"""
+        var xml = $"""
             <LifecycleConfiguration xmlns="{Ns}">
               <Rule>
                 <Prefix>logs/</Prefix>
@@ -58,8 +56,7 @@ public class S3LifecycleXmlTests
     [Fact]
     public void Parse_RejectsBothDaysAndDate()
     {
-        var xml =
-            $"""
+        var xml = $"""
             <LifecycleConfiguration xmlns="{Ns}">
               <Rule>
                 <Status>Enabled</Status>
@@ -75,8 +72,7 @@ public class S3LifecycleXmlTests
     [Fact]
     public void Parse_RejectsNonPositiveDays()
     {
-        var xml =
-            $"""
+        var xml = $"""
             <LifecycleConfiguration xmlns="{Ns}">
               <Rule>
                 <Status>Enabled</Status>
@@ -92,8 +88,7 @@ public class S3LifecycleXmlTests
     [Fact]
     public void BuildThenParse_RoundTrips()
     {
-        var xml =
-            $"""
+        var xml = $"""
             <LifecycleConfiguration xmlns="{Ns}">
               <Rule>
                 <ID>r1</ID>

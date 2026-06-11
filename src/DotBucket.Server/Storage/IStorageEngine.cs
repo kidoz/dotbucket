@@ -68,10 +68,7 @@ public interface IStorageEngine
         string bucketName,
         CancellationToken cancellationToken = default
     );
-    Task DeleteLifecycleAsync(
-        string bucketName,
-        CancellationToken cancellationToken = default
-    );
+    Task DeleteLifecycleAsync(string bucketName, CancellationToken cancellationToken = default);
     Task<IEnumerable<(string Key, string VersionId)>> ListExpiredObjectsAsync(
         string bucketName,
         string? prefix,

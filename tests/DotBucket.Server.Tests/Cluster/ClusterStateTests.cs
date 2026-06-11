@@ -1,9 +1,9 @@
 // Licensed under the MIT License.
 // See LICENSE file in the project root for full license information.
 
+using AwesomeAssertions;
 using DotBucket.Server.Cluster;
 using DotBucket.Server.Configuration;
-using AwesomeAssertions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NSubstitute;
@@ -24,9 +24,21 @@ public class ClusterStateTests
                 LeaderNodeId = "node-1",
                 Nodes =
                 [
-                    new ClusterOptions.NodeEntry { NodeId = "node-1", Address = "http://node-1:9000" },
-                    new ClusterOptions.NodeEntry { NodeId = "node-2", Address = "http://node-2:9000" },
-                    new ClusterOptions.NodeEntry { NodeId = "node-3", Address = "http://node-3:9000" },
+                    new ClusterOptions.NodeEntry
+                    {
+                        NodeId = "node-1",
+                        Address = "http://node-1:9000",
+                    },
+                    new ClusterOptions.NodeEntry
+                    {
+                        NodeId = "node-2",
+                        Address = "http://node-2:9000",
+                    },
+                    new ClusterOptions.NodeEntry
+                    {
+                        NodeId = "node-3",
+                        Address = "http://node-3:9000",
+                    },
                 ],
             }
         );
@@ -36,10 +48,7 @@ public class ClusterStateTests
         state.LeaderNodeId.Should().Be("node-1");
         state.IsLeader.Should().BeFalse();
 
-        state.UpdateNodeHealth(
-            "node-1",
-            new NodeHealth(NodeHealthStatus.Dead, DateTime.UtcNow, 3)
-        );
+        state.UpdateNodeHealth("node-1", new NodeHealth(NodeHealthStatus.Dead, DateTime.UtcNow, 3));
 
         state.LeaderNodeId.Should().Be("node-2");
         state.IsLeader.Should().BeTrue();
@@ -58,11 +67,31 @@ public class ClusterStateTests
                 LeaderNodeId = "node-1",
                 Nodes =
                 [
-                    new ClusterOptions.NodeEntry { NodeId = "node-1", Address = "http://node-1:9000" },
-                    new ClusterOptions.NodeEntry { NodeId = "node-2", Address = "http://node-2:9000" },
-                    new ClusterOptions.NodeEntry { NodeId = "node-3", Address = "http://node-3:9000" },
-                    new ClusterOptions.NodeEntry { NodeId = "node-4", Address = "http://node-4:9000" },
-                    new ClusterOptions.NodeEntry { NodeId = "node-5", Address = "http://node-5:9000" },
+                    new ClusterOptions.NodeEntry
+                    {
+                        NodeId = "node-1",
+                        Address = "http://node-1:9000",
+                    },
+                    new ClusterOptions.NodeEntry
+                    {
+                        NodeId = "node-2",
+                        Address = "http://node-2:9000",
+                    },
+                    new ClusterOptions.NodeEntry
+                    {
+                        NodeId = "node-3",
+                        Address = "http://node-3:9000",
+                    },
+                    new ClusterOptions.NodeEntry
+                    {
+                        NodeId = "node-4",
+                        Address = "http://node-4:9000",
+                    },
+                    new ClusterOptions.NodeEntry
+                    {
+                        NodeId = "node-5",
+                        Address = "http://node-5:9000",
+                    },
                 ],
             }
         );
@@ -95,9 +124,21 @@ public class ClusterStateTests
                 LeaderNodeId = "node-1",
                 Nodes =
                 [
-                    new ClusterOptions.NodeEntry { NodeId = "node-1", Address = "http://node-1:9000" },
-                    new ClusterOptions.NodeEntry { NodeId = "node-2", Address = "http://node-2:9000" },
-                    new ClusterOptions.NodeEntry { NodeId = "node-3", Address = "http://node-3:9000" },
+                    new ClusterOptions.NodeEntry
+                    {
+                        NodeId = "node-1",
+                        Address = "http://node-1:9000",
+                    },
+                    new ClusterOptions.NodeEntry
+                    {
+                        NodeId = "node-2",
+                        Address = "http://node-2:9000",
+                    },
+                    new ClusterOptions.NodeEntry
+                    {
+                        NodeId = "node-3",
+                        Address = "http://node-3:9000",
+                    },
                 ],
             }
         );

@@ -697,7 +697,12 @@ public class DistributedStorageEngine(
         {
             try
             {
-                var deleted = await DeleteObjectAsync(bucketName, key, versionId, cancellationToken);
+                var deleted = await DeleteObjectAsync(
+                    bucketName,
+                    key,
+                    versionId,
+                    cancellationToken
+                );
                 if (deleted)
                 {
                     results.Add((key, true, null, null));
@@ -928,7 +933,9 @@ public class DistributedStorageEngine(
         string? nextToken = null;
         if (isTruncated && page.Count > 0)
         {
-            nextToken = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(page[^1].ObjectKey));
+            nextToken = Convert.ToBase64String(
+                System.Text.Encoding.UTF8.GetBytes(page[^1].ObjectKey)
+            );
         }
 
         return (page, nextToken, isTruncated);

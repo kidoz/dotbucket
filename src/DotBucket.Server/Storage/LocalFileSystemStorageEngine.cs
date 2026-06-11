@@ -240,11 +240,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         CleanupOrphanedTempFiles();
     }
 
-    private static void RunMigration(
-        SqliteConnection connection,
-        int version,
-        string sql
-    )
+    private static void RunMigration(SqliteConnection connection, int version, string sql)
     {
         using var checkCmd = connection.CreateCommand();
         checkCmd.CommandText = "SELECT 1 FROM schema_migrations WHERE version = $v";
@@ -530,7 +526,10 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         command.Parameters.AddWithValue("$bucket", bucketName);
         command.Parameters.AddWithValue(
             "$json",
-            JsonSerializer.Serialize(config, StorageObjectJsonContext.Default.LifecycleConfiguration)
+            JsonSerializer.Serialize(
+                config,
+                StorageObjectJsonContext.Default.LifecycleConfiguration
+            )
         );
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -607,7 +606,17 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         Dictionary<string, string>? metadata = null,
         string? encryption = null,
         CancellationToken cancellationToken = default
-    ) => PutObjectAsync(bucketName, objectKey, content, contentType, metadata, encryption, cancellationToken, replicaVersionId: null);
+    ) =>
+        PutObjectAsync(
+            bucketName,
+            objectKey,
+            content,
+            contentType,
+            metadata,
+            encryption,
+            cancellationToken,
+            replicaVersionId: null
+        );
 
     public async Task<StorageObject> PutObjectAsync(
         string bucketName,

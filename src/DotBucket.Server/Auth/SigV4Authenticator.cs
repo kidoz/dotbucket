@@ -21,6 +21,10 @@ public class SigV4Authenticator(
 ) : ISigV4Authenticator
 {
     private const string Algorithm = "AWS4-HMAC-SHA256";
+    private const string StreamingSignedPayload = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
+    private const string StreamingSignedPayloadTrailer =
+        "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER";
+    private const string StreamingUnsignedPayloadTrailer = "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
     private static readonly TimeSpan MaxClockSkew = TimeSpan.FromMinutes(15);
 
     private readonly S3Options _s3Options = s3Options.Value;
@@ -115,16 +119,49 @@ public class SigV4Authenticator(
         context.Request.EnableBuffering();
 
         string payloadHash;
+        var isStreamingPayload = false;
+        long decodedContentLength = 0;
         if (context.Request.Headers.TryGetValue("x-amz-content-sha256", out var headerHash))
         {
             var headerValue = headerHash.ToString();
 
-            // UNSIGNED-PAYLOAD and streaming modes skip body hash validation
-            if (
-                headerValue == "UNSIGNED-PAYLOAD"
-                || headerValue.StartsWith("STREAMING-", StringComparison.Ordinal)
-            )
+            if (headerValue.StartsWith("STREAMING-", StringComparison.Ordinal))
             {
+                // Streaming (aws-chunked) payloads: the header signature covers only the
+                // sentinel value; body integrity is enforced per-chunk after auth succeeds.
+                if (
+                    headerValue
+                    is not (
+                        StreamingSignedPayload
+                        or StreamingSignedPayloadTrailer
+                        or StreamingUnsignedPayloadTrailer
+                    )
+                )
+                {
+                    logger.LogWarning("Unsupported streaming payload mode: {Mode}", headerValue);
+                    return false;
+                }
+
+                var decodedLengthHeader = context
+                    .Request.Headers["x-amz-decoded-content-length"]
+                    .ToString();
+                if (
+                    !long.TryParse(decodedLengthHeader, out decodedContentLength)
+                    || decodedContentLength < 0
+                )
+                {
+                    logger.LogWarning(
+                        "Streaming payload is missing a valid x-amz-decoded-content-length header."
+                    );
+                    return false;
+                }
+
+                isStreamingPayload = true;
+                payloadHash = headerValue;
+            }
+            else if (headerValue == "UNSIGNED-PAYLOAD")
+            {
+                // UNSIGNED-PAYLOAD skips body hash validation
                 payloadHash = headerValue;
             }
             else
@@ -181,6 +218,27 @@ public class SigV4Authenticator(
         {
             logger.LogWarning("Signature mismatch for access key: {AccessKey}", accessKey);
             return false;
+        }
+
+        if (isStreamingPayload)
+        {
+            // Replace the body with a decoder that strips aws-chunked framing and
+            // validates the per-chunk signature chain rooted at the header signature.
+            var signingContext =
+                payloadHash == StreamingUnsignedPayloadTrailer
+                    ? null
+                    : new ChunkSigningContext(
+                        signatureKey,
+                        providedSignature,
+                        amzDate,
+                        $"{dateStamp}/{region}/{service}/aws4_request"
+                    );
+            context.Request.Body = new SigV4UnchunkingStream(
+                context.Request.Body,
+                decodedContentLength,
+                hasTrailer: payloadHash != StreamingSignedPayload,
+                signingContext
+            );
         }
 
         logger.LogInformation(
@@ -345,7 +403,13 @@ public class SigV4Authenticator(
         if (!hasSessionToken)
             return true;
 
-        if (string.Equals(_authOptions.SessionTokenMode, "Reject", StringComparison.OrdinalIgnoreCase))
+        if (
+            string.Equals(
+                _authOptions.SessionTokenMode,
+                "Reject",
+                StringComparison.OrdinalIgnoreCase
+            )
+        )
         {
             logger.LogWarning("Request carries a session token but SessionTokenMode is 'Reject'.");
             return false;

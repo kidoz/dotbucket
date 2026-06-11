@@ -4,9 +4,9 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using AwesomeAssertions;
 using DotBucket.Server.Auth;
 using DotBucket.Server.Configuration;
-using AwesomeAssertions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -44,10 +44,7 @@ public class SigV4AuthenticatorTests
         var context = new DefaultHttpContext();
 
         // Act
-        var result = await _sut.AuthenticateAsync(
-            context,
-            TestContext.Current.CancellationToken
-        );
+        var result = await _sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
 
         // Assert
         result.Should().BeFalse();
@@ -65,10 +62,7 @@ public class SigV4AuthenticatorTests
             .Returns((string?)null);
 
         // Act
-        var result = await _sut.AuthenticateAsync(
-            context,
-            TestContext.Current.CancellationToken
-        );
+        var result = await _sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
 
         // Assert
         result.Should().BeFalse();
@@ -99,10 +93,7 @@ public class SigV4AuthenticatorTests
             .Returns(TestSecretKey);
 
         // Act
-        var result = await _sut.AuthenticateAsync(
-            context,
-            TestContext.Current.CancellationToken
-        );
+        var result = await _sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
 
         // Assert
         result.Should().BeFalse();
@@ -129,13 +120,144 @@ public class SigV4AuthenticatorTests
             .Returns(TestSecretKey);
 
         // Act
-        var result = await _sut.AuthenticateAsync(
-            context,
-            TestContext.Current.CancellationToken
-        );
+        var result = await _sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
 
         // Assert
         result.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task AuthenticateAsync_WrapsBodyInValidatingUnchunkingStream_ForStreamingPayload()
+    {
+        // Arrange: a signed streaming PUT whose body carries valid chained chunk signatures
+        var dateTime = DateTime.UtcNow;
+        var payload = "streaming payload contents"u8.ToArray();
+        const string streamingHash = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
+
+        var context = CreateSignedContext(
+            HttpMethod.Put,
+            "/test-bucket/test-key",
+            streamingHash,
+            [],
+            dateTime
+        );
+        // Not part of SignedHeaders, so adding it post-signing keeps the signature valid.
+        context.Request.Headers["x-amz-decoded-content-length"] = payload.Length.ToString();
+
+        var seedSignature = ExtractSignature(context.Request.Headers.Authorization.ToString());
+        var dateStamp = dateTime.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+        var amzDate = dateTime.ToString("yyyyMMddTHHmmssZ", CultureInfo.InvariantCulture);
+        var signingKey = DeriveSigningKey(TestSecretKey, dateStamp, TestRegion, TestService);
+        var scope = $"{dateStamp}/{TestRegion}/{TestService}/aws4_request";
+        context.Request.Body = new MemoryStream(
+            BuildSignedChunkedBody(payload, signingKey, seedSignature, amzDate, scope)
+        );
+
+        _credentialStore
+            .GetSecretKeyAsync(TestAccessKey, Arg.Any<CancellationToken>())
+            .Returns(TestSecretKey);
+
+        // Act
+        var result = await _sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
+
+        // Assert: authenticated, body replaced with a decoder that yields the raw payload
+        result.Should().BeTrue();
+        context.Request.Body.Should().BeOfType<SigV4UnchunkingStream>();
+        using var decoded = new MemoryStream();
+        await context.Request.Body.CopyToAsync(decoded, TestContext.Current.CancellationToken);
+        decoded.ToArray().Should().Equal(payload);
+    }
+
+    [Fact]
+    public async Task AuthenticateAsync_StreamingBodyThrows_WhenChunkSignatureIsInvalid()
+    {
+        // Arrange: valid header signature, but chunk signatures not rooted at it
+        var dateTime = DateTime.UtcNow;
+        var payload = "streaming payload contents"u8.ToArray();
+        const string streamingHash = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
+
+        var context = CreateSignedContext(
+            HttpMethod.Put,
+            "/test-bucket/test-key",
+            streamingHash,
+            [],
+            dateTime
+        );
+        context.Request.Headers["x-amz-decoded-content-length"] = payload.Length.ToString();
+
+        var dateStamp = dateTime.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+        var amzDate = dateTime.ToString("yyyyMMddTHHmmssZ", CultureInfo.InvariantCulture);
+        var signingKey = DeriveSigningKey(TestSecretKey, dateStamp, TestRegion, TestService);
+        var scope = $"{dateStamp}/{TestRegion}/{TestService}/aws4_request";
+        // Chain rooted at a bogus seed instead of the request signature.
+        context.Request.Body = new MemoryStream(
+            BuildSignedChunkedBody(payload, signingKey, new string('f', 64), amzDate, scope)
+        );
+
+        _credentialStore
+            .GetSecretKeyAsync(TestAccessKey, Arg.Any<CancellationToken>())
+            .Returns(TestSecretKey);
+
+        // Act
+        var result = await _sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
+
+        // Assert: auth succeeds (header is valid) but reading the body fails closed
+        result.Should().BeTrue();
+        var act = async () =>
+        {
+            using var decoded = new MemoryStream();
+            await context.Request.Body.CopyToAsync(decoded, TestContext.Current.CancellationToken);
+        };
+        await act.Should().ThrowAsync<SigV4StreamingException>();
+    }
+
+    [Fact]
+    public async Task AuthenticateAsync_ReturnsFalse_WhenStreamingPayloadLacksDecodedLength()
+    {
+        // Arrange
+        var dateTime = DateTime.UtcNow;
+        var context = CreateSignedContext(
+            HttpMethod.Put,
+            "/test-bucket/test-key",
+            "STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
+            [],
+            dateTime
+        );
+
+        _credentialStore
+            .GetSecretKeyAsync(TestAccessKey, Arg.Any<CancellationToken>())
+            .Returns(TestSecretKey);
+
+        // Act
+        var result = await _sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
+
+        // Assert
+        result.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task AuthenticateAsync_ReturnsFalse_ForUnsupportedStreamingMode()
+    {
+        // Arrange
+        var dateTime = DateTime.UtcNow;
+        var context = CreateSignedContext(
+            HttpMethod.Put,
+            "/test-bucket/test-key",
+            "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD",
+            [],
+            dateTime
+        );
+        context.Request.Headers["x-amz-decoded-content-length"] = "10";
+
+        _credentialStore
+            .GetSecretKeyAsync(TestAccessKey, Arg.Any<CancellationToken>())
+            .Returns(TestSecretKey);
+
+        // Act
+        var result = await _sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
+
+        // Assert
+        result.Should().BeFalse();
     }
 
     [Fact]
@@ -158,10 +280,7 @@ public class SigV4AuthenticatorTests
             .Returns(TestSecretKey);
 
         // Act
-        var result = await _sut.AuthenticateAsync(
-            context,
-            TestContext.Current.CancellationToken
-        );
+        var result = await _sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
 
         // Assert
         result.Should().BeTrue();
@@ -175,23 +294,14 @@ public class SigV4AuthenticatorTests
         var body = Array.Empty<byte>();
         var bodyHash = ComputeSha256Hex(body);
 
-        var context = CreateSignedContext(
-            HttpMethod.Get,
-            "/test-bucket",
-            bodyHash,
-            body,
-            dateTime
-        );
+        var context = CreateSignedContext(HttpMethod.Get, "/test-bucket", bodyHash, body, dateTime);
 
         _credentialStore
             .GetSecretKeyAsync(TestAccessKey, Arg.Any<CancellationToken>())
             .Returns(TestSecretKey);
 
         // Act
-        var result = await _sut.AuthenticateAsync(
-            context,
-            TestContext.Current.CancellationToken
-        );
+        var result = await _sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
 
         // Assert
         result.Should().BeFalse();
@@ -222,9 +332,7 @@ public class SigV4AuthenticatorTests
             .Returns(TestSecretKey);
 
         // Signed region is us-east-1; configured strict region is eu-west-1.
-        var sut = CreateSut(
-            s3: new S3Options { StrictSigningRegion = true, Region = "eu-west-1" }
-        );
+        var sut = CreateSut(s3: new S3Options { StrictSigningRegion = true, Region = "eu-west-1" });
 
         var result = await sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
 
@@ -247,9 +355,7 @@ public class SigV4AuthenticatorTests
             .GetSecretKeyAsync(TestAccessKey, Arg.Any<CancellationToken>())
             .Returns(TestSecretKey);
 
-        var sut = CreateSut(
-            s3: new S3Options { StrictSigningRegion = true, Region = TestRegion }
-        );
+        var sut = CreateSut(s3: new S3Options { StrictSigningRegion = true, Region = TestRegion });
 
         var result = await sut.AuthenticateAsync(context, TestContext.Current.CancellationToken);
 
@@ -413,6 +519,58 @@ public class SigV4AuthenticatorTests
     {
         using var sha256 = SHA256.Create();
         return Convert.ToHexString(sha256.ComputeHash(data)).ToLowerInvariant();
+    }
+
+    private static string ExtractSignature(string authorizationHeader)
+    {
+        var idx = authorizationHeader.IndexOf("Signature=", StringComparison.Ordinal);
+        return authorizationHeader[(idx + "Signature=".Length)..];
+    }
+
+    private static byte[] DeriveSigningKey(
+        string secretKey,
+        string dateStamp,
+        string region,
+        string service
+    )
+    {
+        var kSecret = Encoding.UTF8.GetBytes("AWS4" + secretKey);
+        var kDate = HmacSha256(kSecret, dateStamp);
+        var kRegion = HmacSha256(kDate, region);
+        var kService = HmacSha256(kRegion, service);
+        return HmacSha256(kService, "aws4_request");
+    }
+
+    private static byte[] BuildSignedChunkedBody(
+        byte[] payload,
+        byte[] signingKey,
+        string seedSignature,
+        string amzDate,
+        string scope
+    )
+    {
+        const string emptySha256 =
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+        string SignChunk(string previous, byte[] chunkData)
+        {
+            var chunkHash = Convert.ToHexString(SHA256.HashData(chunkData)).ToLowerInvariant();
+            var stringToSign =
+                $"AWS4-HMAC-SHA256-PAYLOAD\n{amzDate}\n{scope}\n{previous}\n{emptySha256}\n{chunkHash}";
+            return Convert.ToHexString(HmacSha256(signingKey, stringToSign)).ToLowerInvariant();
+        }
+
+        var body = new MemoryStream();
+        var chunkSignature = SignChunk(seedSignature, payload);
+        body.Write(
+            Encoding.ASCII.GetBytes($"{payload.Length:x};chunk-signature={chunkSignature}\r\n")
+        );
+        body.Write(payload);
+        body.Write("\r\n"u8);
+        var finalSignature = SignChunk(chunkSignature, []);
+        body.Write(Encoding.ASCII.GetBytes($"0;chunk-signature={finalSignature}\r\n"));
+        body.Write("\r\n"u8);
+        return body.ToArray();
     }
 
     private static byte[] HmacSha256(byte[] key, string data)

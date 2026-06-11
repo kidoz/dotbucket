@@ -2,65 +2,107 @@
 // See LICENSE file in the project root for full license information.
 
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace DotBucket.Server.Auth;
 
+/// <summary>
+/// Thrown when an aws-chunked request body fails decoding or chunk signature validation.
+/// </summary>
+public class SigV4StreamingException(string message) : IOException(message);
+
+/// <summary>
+/// Signing material needed to validate per-chunk signatures, derived from the
+/// already-verified seed (header) signature of the request.
+/// </summary>
+public record ChunkSigningContext(
+    byte[] SigningKey,
+    string SeedSignature,
+    string AmzDate,
+    string CredentialScope
+);
+
+/// <summary>
+/// Decodes an aws-chunked request body and validates each chunk's signature against
+/// the AWS SigV4 streaming specification (AWS4-HMAC-SHA256-PAYLOAD). The chunk
+/// signatures form a chain rooted at the seed signature; any tampered, reordered,
+/// or truncated chunk fails validation and aborts the stream.
+/// When <see cref="ChunkSigningContext"/> is null (STREAMING-UNSIGNED-PAYLOAD-TRAILER),
+/// only framing and total decoded length are enforced.
+/// </summary>
 public class SigV4UnchunkingStream : Stream
 {
-    private readonly Stream _inner;
-    private long _remainingInChunk;
-    private bool _done;
+    private const string EmptySha256 =
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    private const int MaxHeaderLineLength = 4096;
 
-    public SigV4UnchunkingStream(Stream inner)
+    private readonly Stream _inner;
+    private readonly long _expectedDecodedLength;
+    private readonly bool _hasTrailer;
+    private readonly ChunkSigningContext? _signing;
+
+    private long _remainingInChunk;
+    private long _totalDecoded;
+    private bool _done;
+    private string _previousSignature;
+    private string _currentChunkSignature = "";
+    private IncrementalHash? _chunkHash;
+
+    public SigV4UnchunkingStream(
+        Stream inner,
+        long expectedDecodedLength,
+        bool hasTrailer = false,
+        ChunkSigningContext? signingContext = null
+    )
     {
         _inner = inner;
+        _expectedDecodedLength = expectedDecodedLength;
+        _hasTrailer = hasTrailer;
+        _signing = signingContext;
+        _previousSignature = signingContext?.SeedSignature ?? "";
     }
 
     public override bool CanRead => true;
     public override bool CanSeek => false;
     public override bool CanWrite => false;
     public override long Length => throw new NotSupportedException();
-    public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
-
-    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    public override long Position
     {
-        if (_done) return 0;
+        get => throw new NotSupportedException();
+        set => throw new NotSupportedException();
+    }
+
+    public override async ValueTask<int> ReadAsync(
+        Memory<byte> buffer,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (_done)
+            return 0;
 
         if (_remainingInChunk == 0)
         {
-            var line = await ReadLineAsync(cancellationToken);
-            if (string.IsNullOrEmpty(line))
+            var startedChunk = await BeginChunkAsync(cancellationToken);
+            if (!startedChunk)
             {
-                _done = true;
-                return 0;
-            }
-
-            var semiIdx = line.IndexOf(';');
-            var hexSize = semiIdx != -1 ? line[..semiIdx] : line;
-            if (!long.TryParse(hexSize, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out _remainingInChunk))
-            {
-                _done = true;
-                return 0;
-            }
-
-            if (_remainingInChunk == 0)
-            {
-                _done = true;
-                // Final \r\n after the 0 chunk
-                await ReadLineAsync(cancellationToken); 
+                await FinishStreamAsync(cancellationToken);
                 return 0;
             }
         }
 
         int toRead = (int)Math.Min((long)buffer.Length, _remainingInChunk);
         int read = await _inner.ReadAsync(buffer[..toRead], cancellationToken);
-        if (read == 0 && toRead > 0) throw new EndOfStreamException();
-        
+        if (read == 0 && toRead > 0)
+            throw new SigV4StreamingException("Unexpected end of stream inside a chunk.");
+
+        _chunkHash?.AppendData(buffer.Span[..read]);
         _remainingInChunk -= read;
+        _totalDecoded += read;
 
         if (_remainingInChunk == 0)
         {
+            CompleteChunk();
             // Consume \r\n after chunk data
             await ReadLineAsync(cancellationToken);
         }
@@ -68,15 +110,205 @@ public class SigV4UnchunkingStream : Stream
         return read;
     }
 
-    private async Task<string> ReadLineAsync(CancellationToken ct)
+    /// <summary>
+    /// Reads the next chunk header. Returns false when the terminal zero-length
+    /// chunk was consumed (and validated), true when a data chunk begins.
+    /// </summary>
+    private async Task<bool> BeginChunkAsync(CancellationToken ct)
+    {
+        var line = await ReadLineAsync(ct);
+        if (string.IsNullOrEmpty(line))
+            throw new SigV4StreamingException("Missing chunk header line.");
+
+        var semiIdx = line.IndexOf(';');
+        var hexSize = semiIdx != -1 ? line[..semiIdx] : line;
+        if (
+            !long.TryParse(
+                hexSize,
+                NumberStyles.HexNumber,
+                CultureInfo.InvariantCulture,
+                out var chunkSize
+            )
+            || chunkSize < 0
+        )
+        {
+            throw new SigV4StreamingException($"Malformed chunk size '{hexSize}'.");
+        }
+
+        if (_signing != null)
+        {
+            _currentChunkSignature = ParseChunkSignature(line, semiIdx);
+        }
+
+        if (_totalDecoded + chunkSize > _expectedDecodedLength)
+        {
+            throw new SigV4StreamingException(
+                "Chunked payload exceeds x-amz-decoded-content-length."
+            );
+        }
+
+        if (chunkSize == 0)
+        {
+            // The terminal chunk signs the empty hash.
+            if (_signing != null)
+                ValidateChunkSignature(EmptySha256);
+            return false;
+        }
+
+        _remainingInChunk = chunkSize;
+        if (_signing != null)
+            _chunkHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        return true;
+    }
+
+    private void CompleteChunk()
+    {
+        if (_chunkHash == null)
+            return;
+
+        var chunkDataHash = Convert.ToHexString(_chunkHash.GetHashAndReset()).ToLowerInvariant();
+        _chunkHash.Dispose();
+        _chunkHash = null;
+        ValidateChunkSignature(chunkDataHash);
+    }
+
+    private void ValidateChunkSignature(string chunkDataHash)
+    {
+        var signing = _signing!;
+        var stringToSign =
+            $"AWS4-HMAC-SHA256-PAYLOAD\n{signing.AmzDate}\n{signing.CredentialScope}\n{_previousSignature}\n{EmptySha256}\n{chunkDataHash}";
+        var expected = ComputeHmacHex(signing.SigningKey, stringToSign);
+
+        if (
+            !CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(expected),
+                Encoding.UTF8.GetBytes(_currentChunkSignature)
+            )
+        )
+        {
+            throw new SigV4StreamingException("Chunk signature does not match.");
+        }
+
+        _previousSignature = _currentChunkSignature;
+    }
+
+    private async Task FinishStreamAsync(CancellationToken ct)
+    {
+        _done = true;
+
+        if (_totalDecoded != _expectedDecodedLength)
+        {
+            throw new SigV4StreamingException(
+                $"Decoded payload length {_totalDecoded} does not match x-amz-decoded-content-length {_expectedDecodedLength}."
+            );
+        }
+
+        if (_hasTrailer)
+        {
+            await ConsumeTrailerAsync(ct);
+        }
+        else
+        {
+            // Final \r\n after the terminal chunk (lenient: may be absent at EOF).
+            await ReadLineAsync(ct, allowEof: true);
+        }
+    }
+
+    private async Task ConsumeTrailerAsync(CancellationToken ct)
+    {
+        var trailers = new List<(string Name, string Value)>();
+        string? trailerSignature = null;
+
+        while (true)
+        {
+            var line = await ReadLineAsync(ct, allowEof: true);
+            if (string.IsNullOrEmpty(line))
+                break;
+
+            var colonIdx = line.IndexOf(':');
+            if (colonIdx <= 0)
+                throw new SigV4StreamingException("Malformed trailer header line.");
+
+            var name = line[..colonIdx].Trim().ToLowerInvariant();
+            var value = line[(colonIdx + 1)..].Trim();
+
+            if (name == "x-amz-trailer-signature")
+                trailerSignature = value;
+            else
+                trailers.Add((name, value));
+        }
+
+        if (_signing == null)
+            return;
+
+        if (string.IsNullOrEmpty(trailerSignature))
+            throw new SigV4StreamingException("Missing x-amz-trailer-signature in signed trailer.");
+
+        var canonicalTrailers = string.Concat(
+            trailers
+                .OrderBy(t => t.Name, StringComparer.Ordinal)
+                .Select(t => $"{t.Name}:{t.Value}\n")
+        );
+        var trailerHash = Convert
+            .ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalTrailers)))
+            .ToLowerInvariant();
+        var stringToSign =
+            $"AWS4-HMAC-SHA256-TRAILER\n{_signing.AmzDate}\n{_signing.CredentialScope}\n{_previousSignature}\n{trailerHash}";
+        var expected = ComputeHmacHex(_signing.SigningKey, stringToSign);
+
+        if (
+            !CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(expected),
+                Encoding.UTF8.GetBytes(trailerSignature)
+            )
+        )
+        {
+            throw new SigV4StreamingException("Trailer signature does not match.");
+        }
+    }
+
+    private static string ParseChunkSignature(string headerLine, int semiIdx)
+    {
+        const string prefix = "chunk-signature=";
+        if (semiIdx == -1)
+            throw new SigV4StreamingException("Chunk header is missing chunk-signature.");
+
+        foreach (var ext in headerLine[(semiIdx + 1)..].Split(';'))
+        {
+            if (ext.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                var sig = ext[prefix.Length..];
+                if (sig.Length != 64 || !sig.All(Uri.IsHexDigit))
+                    throw new SigV4StreamingException("Malformed chunk-signature value.");
+                return sig;
+            }
+        }
+
+        throw new SigV4StreamingException("Chunk header is missing chunk-signature.");
+    }
+
+    private static string ComputeHmacHex(byte[] key, string data)
+    {
+        using var hmac = new HMACSHA256(key);
+        return Convert
+            .ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(data)))
+            .ToLowerInvariant();
+    }
+
+    private async Task<string> ReadLineAsync(CancellationToken ct, bool allowEof = false)
     {
         var sb = new StringBuilder();
         while (true)
         {
             var buffer = new byte[1];
             int read = await _inner.ReadAsync(buffer, ct);
-            if (read == 0) break;
-            
+            if (read == 0)
+            {
+                if (allowEof || sb.Length == 0)
+                    return sb.ToString();
+                throw new SigV4StreamingException("Unexpected end of stream inside chunk framing.");
+            }
+
             char c = (char)buffer[0];
             sb.Append(c);
             if (sb.Length >= 2 && sb[sb.Length - 2] == '\r' && sb[sb.Length - 1] == '\n')
@@ -84,14 +316,27 @@ public class SigV4UnchunkingStream : Stream
                 sb.Length -= 2;
                 return sb.ToString();
             }
-            if (sb.Length > 2048) break; 
+            if (sb.Length > MaxHeaderLineLength)
+                throw new SigV4StreamingException("Chunk framing line exceeds maximum length.");
         }
-        return sb.ToString();
     }
 
     public override void Flush() => _inner.Flush();
-    public override int Read(byte[] buffer, int offset, int count) => ReadAsync(buffer.AsMemory(offset, count)).GetAwaiter().GetResult();
+
+    public override int Read(byte[] buffer, int offset, int count) =>
+        ReadAsync(buffer.AsMemory(offset, count)).GetAwaiter().GetResult();
+
     public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
     public override void SetLength(long value) => throw new NotSupportedException();
-    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) =>
+        throw new NotSupportedException();
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            _chunkHash?.Dispose();
+        base.Dispose(disposing);
+    }
 }

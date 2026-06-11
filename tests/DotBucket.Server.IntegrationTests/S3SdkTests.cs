@@ -3,10 +3,10 @@
 
 using Amazon.S3;
 using Amazon.S3.Model;
-using DotBucket.Server.Auth;
 using AwesomeAssertions;
-using Microsoft.AspNetCore.Mvc.Testing;
+using DotBucket.Server.Auth;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -68,8 +68,10 @@ public class S3SdkTests : IClassFixture<WebApplicationFactory<Program>>
             );
             putBucketResponse.HttpStatusCode.Should().Be(System.Net.HttpStatusCode.OK);
 
-            // 2. PutObject — disable chunked encoding to avoid aws-chunked content
-            // which embeds chunk signatures the server doesn't decode
+            // 2. PutObject — disable chunked encoding: aws-chunked decoding happens in
+            // SigV4Authenticator, which this test bypasses (AllowAllAuthenticator).
+            // Chunk signature validation is covered by SigV4UnchunkingStreamTests
+            // and SigV4AuthenticatorTests.
             var contentBytes = System.Text.Encoding.UTF8.GetBytes(objectContent);
             var putObjectRequest = new PutObjectRequest
             {
@@ -142,10 +144,7 @@ public class S3SdkTests : IClassFixture<WebApplicationFactory<Program>>
             catch { }
             try
             {
-                await s3.DeleteBucketAsync(
-                    new DeleteBucketRequest { BucketName = bucketName },
-                    ct
-                );
+                await s3.DeleteBucketAsync(new DeleteBucketRequest { BucketName = bucketName }, ct);
             }
             catch { }
             throw;
@@ -204,8 +203,7 @@ public class S3SdkTests : IClassFixture<WebApplicationFactory<Program>>
         try
         {
             const string ns = "http://s3.amazonaws.com/doc/2006-03-01/";
-            var lifecycleXml =
-                $"""
+            var lifecycleXml = $"""
                 <LifecycleConfiguration xmlns="{ns}">
                   <Rule>
                     <ID>temp</ID>
@@ -254,8 +252,7 @@ public class S3SdkTests : IClassFixture<WebApplicationFactory<Program>>
         {
             const string ns = "http://s3.amazonaws.com/doc/2006-03-01/";
             // Both Days and Date set => MalformedXML.
-            var bad =
-                $"""
+            var bad = $"""
                 <LifecycleConfiguration xmlns="{ns}">
                   <Rule>
                     <Status>Enabled</Status>

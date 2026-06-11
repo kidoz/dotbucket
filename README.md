@@ -158,6 +158,8 @@ A health check endpoint is also available at `GET /health` (no authentication re
 | `Lifecycle:Enabled` | `true` | Enable the background object-expiration worker |
 | `Lifecycle:ScanIntervalSeconds` | `3600` | Interval between lifecycle expiration scans |
 | `Cluster:TrustedCaBundlePath` | `""` | PEM CA bundle to trust for inter-node HTTPS (empty = OS trust store) |
+| `Observability:OtlpEndpoint` | `""` | OTLP collector endpoint for OpenTelemetry traces/metrics (empty = telemetry disabled); `OTEL_EXPORTER_OTLP_ENDPOINT` also works |
+| `Observability:ServiceName` | `dotbucket` | `service.name` resource attribute on exported telemetry |
 
 Configuration can be set via `appsettings.json`, environment variables (`Storage__RootPath`, `Auth__AdminToken`), or command-line arguments.
 

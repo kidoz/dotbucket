@@ -12,6 +12,9 @@ using DotBucket.Server.Models;
 using DotBucket.Server.Services;
 using DotBucket.Server.Storage;
 using Microsoft.Extensions.Options;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -104,6 +107,40 @@ builder.Services.AddScoped<AdminTokenEndpointFilter>();
 
 // Add Native AOT-safe OpenAPI documentation (.NET 10 feature)
 builder.Services.AddOpenApi();
+
+// OpenTelemetry traces + metrics, exported via OTLP. Enabled only when an endpoint is
+// configured (Observability:OtlpEndpoint or the standard OTEL_EXPORTER_OTLP_ENDPOINT).
+// Uses the runtime's built-in activity sources and meters instead of instrumentation
+// packages to stay Native AOT / full-trim compatible.
+var otlpEndpoint =
+    builder.Configuration["Observability:OtlpEndpoint"]
+    ?? builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
+if (!string.IsNullOrEmpty(otlpEndpoint))
+{
+    var serviceName = builder.Configuration["Observability:ServiceName"] ?? "dotbucket";
+    var serviceInstanceId =
+        clusterConfig?.Enabled == true ? clusterConfig.NodeId : Environment.MachineName;
+
+    builder
+        .Services.AddOpenTelemetry()
+        .ConfigureResource(resource =>
+            resource.AddService(serviceName, serviceInstanceId: serviceInstanceId)
+        )
+        .WithTracing(tracing =>
+            tracing
+                .AddSource("Microsoft.AspNetCore")
+                .AddSource("System.Net.Http")
+                .AddOtlpExporter(options => options.Endpoint = new Uri(otlpEndpoint))
+        )
+        .WithMetrics(metrics =>
+            metrics
+                .AddMeter("Microsoft.AspNetCore.Hosting")
+                .AddMeter("Microsoft.AspNetCore.Server.Kestrel")
+                .AddMeter("System.Net.Http")
+                .AddMeter("System.Runtime")
+                .AddOtlpExporter(options => options.Endpoint = new Uri(otlpEndpoint))
+        );
+}
 
 // Configure HSTS for production
 builder.Services.AddHsts(options =>

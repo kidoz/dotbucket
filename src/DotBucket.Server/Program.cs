@@ -174,6 +174,15 @@ else if (authOptions.RootAccessKey == "minioadmin" || authOptions.RootSecretKey 
     );
 }
 
+// IAM state is node-local and not replicated; surface this loudly in cluster mode.
+if (clusterConfig?.Enabled == true)
+{
+    app.Logger.LogWarning(
+        "Cluster mode is enabled, but IAM state (users, policies, access keys) lives in a node-local SQLite database and is NOT replicated. "
+            + "Apply IAM changes to every node, or they will only take effect on the node that received them."
+    );
+}
+
 // HTTPS enforcement
 if (!app.Environment.IsDevelopment())
 {

@@ -241,6 +241,10 @@ Planned / future work:
 
 - Noncurrent-version expiration and `AbortIncompleteMultipartUpload` lifecycle actions.
 - Cluster-wide lifecycle expiration (currently single-node).
+- Replicated IAM state for cluster mode. **Known limitation:** IAM data (users, access keys,
+  policies) is stored in a node-local SQLite database and is not replicated between cluster
+  nodes — IAM changes made on one node do not propagate to the others. Apply IAM changes on
+  every node, or rely on configuration-seeded credentials shared by all nodes.
 
 ## License
 

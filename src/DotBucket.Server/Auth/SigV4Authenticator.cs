@@ -488,17 +488,18 @@ public class SigV4Authenticator(
         if (string.IsNullOrEmpty(path) || path == "/")
             return "/";
 
+        // Re-encode each path segment; slashes separate segments and are kept as-is.
+        // The leading '/' is reproduced by the empty first segment.
         var segments = path.Split('/');
         var encoded = new StringBuilder();
-        foreach (var segment in segments)
+        for (var i = 0; i < segments.Length; i++)
         {
-            if (encoded.Length > 0 || segment.Length == 0)
+            if (i > 0)
                 encoded.Append('/');
-            if (segment.Length > 0)
-                encoded.Append(Uri.EscapeDataString(segment));
+            encoded.Append(Uri.EscapeDataString(segments[i]));
         }
 
-        return encoded.Length == 0 ? "/" : encoded.ToString();
+        return encoded.ToString();
     }
 
     private static string BuildCanonicalQueryString(

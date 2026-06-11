@@ -9,5 +9,6 @@
   <Folder Name="/tests/">
     <Project Path="tests/DotBucket.Server.Tests/DotBucket.Server.Tests.csproj" />
     <Project Path="tests/DotBucket.Server.IntegrationTests/DotBucket.Server.IntegrationTests.csproj" />
+    <Project Path="tests/DotBucket.Server.E2ETests/DotBucket.Server.E2ETests.csproj" />
   </Folder>
 </Solution>

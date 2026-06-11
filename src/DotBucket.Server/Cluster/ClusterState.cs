@@ -24,7 +24,10 @@ public class ClusterState
     private readonly ILogger<ClusterState> _logger;
     private readonly ConcurrentDictionary<string, NodeHealth> _healthMap = new();
     private readonly Lock _leaderLock = new();
-    private string _leaderNodeId;
+
+    // Written under _leaderLock, read lock-free on hot request paths; volatile
+    // guarantees readers observe leader changes promptly.
+    private volatile string _leaderNodeId;
     private long _leaderEpoch;
 
     public ClusterState(IOptions<ClusterOptions> options, ILogger<ClusterState> logger)
@@ -81,7 +84,7 @@ public class ClusterState
     public string SelfAddress => _options.AdvertiseAddress;
     public bool IsLeader => _options.NodeId == _leaderNodeId;
     public string LeaderNodeId => _leaderNodeId;
-    public long LeaderEpoch => _leaderEpoch;
+    public long LeaderEpoch => Interlocked.Read(ref _leaderEpoch);
     public IReadOnlyList<NodeInfo> AllNodes { get; } = [];
 
     public NodeHealth GetNodeHealth(string nodeId)
@@ -157,7 +160,7 @@ public class ClusterState
             }
 
             _leaderNodeId = nextLeader.NodeId;
-            _leaderEpoch++;
+            Interlocked.Increment(ref _leaderEpoch);
             _logger.LogWarning(
                 "Cluster leader changed from {OldLeader} to {NewLeader} (epoch {Epoch}) due to leader health state {Status}. Quorum: {Healthy}/{Required} of {Total} nodes.",
                 nodeId,

@@ -39,7 +39,11 @@ public class LifecycleExpirationTests : IDisposable
             httpClientFactory,
             Substitute.For<ILogger<NotificationDispatcher>>()
         );
-        _storage = new LocalFileSystemStorageEngine(options, dispatcher);
+        _storage = new LocalFileSystemStorageEngine(
+            options,
+            dispatcher,
+            Substitute.For<ILogger<LocalFileSystemStorageEngine>>()
+        );
     }
 
     private async Task<StorageObject> PutAsync(string bucket, string key, CancellationToken ct)

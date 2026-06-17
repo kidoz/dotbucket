@@ -35,7 +35,11 @@ public class IamStoreSecurityTests
                 httpClientFactory,
                 Substitute.For<ILogger<NotificationDispatcher>>()
             );
-            var storage = new LocalFileSystemStorageEngine(storageOptions, dispatcher);
+            var storage = new LocalFileSystemStorageEngine(
+                storageOptions,
+                dispatcher,
+                Substitute.For<ILogger<LocalFileSystemStorageEngine>>()
+            );
             await storage.ListBucketsAsync(TestContext.Current.CancellationToken);
 
             var store = new IamStore(storageOptions);

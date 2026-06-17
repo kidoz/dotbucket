@@ -275,6 +275,62 @@ public class S3SdkTests : IClassFixture<WebApplicationFactory<Program>>
         }
     }
 
+    [Fact]
+    public async Task ServerSideEncryption_RoundTrips_WithPlaintextContentLength()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var s3 = CreateS3Client();
+        var bucket = $"sse-test-{Guid.NewGuid():N}";
+        var key = "secret.bin";
+        // Larger than one GCM chunk (64 KiB) to exercise multi-frame encryption.
+        var content = new byte[200_000];
+        Random.Shared.NextBytes(content);
+
+        try
+        {
+            await s3.PutBucketAsync(new PutBucketRequest { BucketName = bucket }, ct);
+
+            var put = await s3.PutObjectAsync(
+                new PutObjectRequest
+                {
+                    BucketName = bucket,
+                    Key = key,
+                    InputStream = new MemoryStream(content),
+                    ContentType = "application/octet-stream",
+                    ServerSideEncryptionMethod = ServerSideEncryptionMethod.AES256,
+                    UseChunkEncoding = false,
+                },
+                ct
+            );
+            put.HttpStatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+
+            // HEAD Content-Length must be the PLAINTEXT length, not the (larger) ciphertext.
+            var head = await s3.GetObjectMetadataAsync(
+                new GetObjectMetadataRequest { BucketName = bucket, Key = key },
+                ct
+            );
+            head.ContentLength.Should().Be(content.Length);
+
+            // GET returns the decrypted plaintext byte-for-byte.
+            var get = await s3.GetObjectAsync(bucket, key, ct);
+            using var ms = new MemoryStream();
+            await get.ResponseStream.CopyToAsync(ms, ct);
+            ms.ToArray().Should().Equal(content);
+        }
+        finally
+        {
+            try
+            {
+                await s3.DeleteObjectAsync(
+                    new DeleteObjectRequest { BucketName = bucket, Key = key },
+                    ct
+                );
+                await s3.DeleteBucketAsync(new DeleteBucketRequest { BucketName = bucket }, ct);
+            }
+            catch { }
+        }
+    }
+
     private class UriFixingHandler(HttpClient innerClient) : HttpMessageHandler
     {
         protected override async Task<HttpResponseMessage> SendAsync(

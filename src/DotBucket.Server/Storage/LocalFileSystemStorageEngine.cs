@@ -2,12 +2,14 @@
 // See LICENSE file in the project root for full license information.
 
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using DotBucket.Server.Configuration;
 using DotBucket.Server.Models;
 using DotBucket.Server.Services;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace DotBucket.Server.Storage;
@@ -20,13 +22,16 @@ public class LocalFileSystemStorageEngine : IStorageEngine
     private readonly byte[] _masterKey;
     private readonly int _multipartBufferSize;
     private readonly NotificationDispatcher _dispatcher;
+    private readonly ILogger<LocalFileSystemStorageEngine> _logger;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _writeLocks = new();
 
     public LocalFileSystemStorageEngine(
         IOptions<StorageOptions> options,
-        NotificationDispatcher dispatcher
+        NotificationDispatcher dispatcher,
+        ILogger<LocalFileSystemStorageEngine> logger
     )
     {
+        _logger = logger;
         _rootPath = options.Value.RootPath;
         if (string.IsNullOrWhiteSpace(_rootPath))
         {
@@ -60,6 +65,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         _dbPath = Path.Combine(_rootPath, "metadata.db");
         _dispatcher = dispatcher;
         InitializeDatabase();
+        ReconcileOnStartup();
 
         // Background task to prune unused locks
         _ = Task.Run(async () =>
@@ -281,6 +287,101 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             }
         }
         catch { }
+    }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int open(string pathname, int flags);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int close(int fd);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fsync(int fd);
+
+    /// <summary>
+    /// Best-effort fsync of a directory so that a freshly published (renamed) object file is
+    /// durable across a crash. No-op on Windows (no portable directory-fsync) and on failure.
+    /// </summary>
+    private static void FsyncDirectory(string? dir)
+    {
+        if (string.IsNullOrEmpty(dir) || OperatingSystem.IsWindows())
+            return;
+        try
+        {
+            const int O_RDONLY = 0;
+            var fd = open(dir, O_RDONLY);
+            if (fd < 0)
+                return;
+            try
+            {
+                fsync(fd);
+            }
+            finally
+            {
+                close(fd);
+            }
+        }
+        catch
+        {
+            // Durability hardening is best-effort; never fail a write because of it.
+        }
+    }
+
+    /// <summary>
+    /// Startup reconciliation: detects object metadata rows whose backing file is missing
+    /// (e.g. after a crash between byte and metadata writes) and reports them loudly. This is
+    /// report-only — it never deletes data automatically — so operators can decide whether to
+    /// restore from a replica/backup or purge the dangling rows.
+    /// </summary>
+    private void ReconcileOnStartup()
+    {
+        try
+        {
+            using var connection = OpenConnection();
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                "SELECT bucket_name, object_key, version_id FROM objects WHERE is_delete_marker = 0";
+            using var reader = command.ExecuteReader();
+
+            var missing = 0;
+            var examples = new List<string>();
+            while (reader.Read())
+            {
+                var bucket = reader.GetString(0);
+                var key = reader.GetString(1);
+                var versionId = reader.GetString(2);
+                string path;
+                try
+                {
+                    path = GetObjectPath(bucket, key, versionId);
+                }
+                catch
+                {
+                    continue;
+                }
+                if (!File.Exists(path))
+                {
+                    missing++;
+                    if (examples.Count < 10)
+                        examples.Add($"{bucket}/{key} (version {versionId})");
+                }
+            }
+
+            if (missing > 0)
+            {
+                _logger.LogError(
+                    "Startup reconciliation found {Count} object metadata row(s) with a missing "
+                        + "backing file (interrupted write or data loss). These will fail on GET. "
+                        + "Examples: {Examples}",
+                    missing,
+                    string.Join("; ", examples)
+                );
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Startup reconciliation pass failed.");
+        }
     }
 
     private static string EscapeLikePattern(string prefix)
@@ -648,15 +749,12 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             if (objectDir != null && !Directory.Exists(objectDir))
                 Directory.CreateDirectory(objectDir);
 
-            var effectiveContent = content;
-            if (encryption == "AES256")
-            {
-                effectiveContent = CreateEncryptionStream(content);
-            }
-
+            // Size and ETag are always computed over the PLAINTEXT, even when the bytes are
+            // encrypted at rest, so HEAD Content-Length and range handling stay correct.
             var (size, eTag) = await WriteAtomicAsync(
                 objectPath,
-                effectiveContent,
+                content,
+                encryption == "AES256",
                 cancellationToken
             );
 
@@ -700,44 +798,17 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         }
     }
 
-    private Stream CreateEncryptionStream(Stream input)
-    {
-        var aes = Aes.Create();
-        aes.Key = _masterKey;
-        aes.GenerateIV();
-        var ms = new MemoryStream();
-        ms.Write(aes.IV, 0, aes.IV.Length);
-        using (var encryptor = aes.CreateEncryptor())
-        using (
-            var cryptoStream = new CryptoStream(
-                ms,
-                encryptor,
-                CryptoStreamMode.Write,
-                leaveOpen: true
-            )
-        )
-        {
-            input.CopyTo(cryptoStream);
-        }
-        ms.Position = 0;
-        return ms;
-    }
-
-    private Stream CreateDecryptionStream(Stream input)
-    {
-        var aes = Aes.Create();
-        aes.Key = _masterKey;
-        var iv = new byte[16];
-        int read = input.Read(iv, 0, 16);
-        if (read < 16)
-            throw new InvalidOperationException("Invalid encrypted file.");
-        aes.IV = iv;
-        return new CryptoStream(input, aes.CreateDecryptor(), CryptoStreamMode.Read);
-    }
-
-    private static async Task<(long Size, string ETag)> WriteAtomicAsync(
+    /// <summary>
+    /// Streams <paramref name="content"/> (plaintext) into a temp file, optionally encrypting it
+    /// at rest with authenticated AES-256-GCM, then atomically publishes it via rename. The
+    /// returned Size and ETag are always computed over the PLAINTEXT. The bytes are flushed to
+    /// disk (fsync) before the rename, and the containing directory is fsync'd after, so a crash
+    /// cannot leave metadata pointing at non-durable bytes.
+    /// </summary>
+    private async Task<(long Size, string ETag)> WriteAtomicAsync(
         string finalPath,
         Stream content,
+        bool encrypt,
         CancellationToken cancellationToken
     )
     {
@@ -759,23 +830,44 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                 )
             )
             {
-                var buffer = new byte[8192];
-                int read;
-                while (
-                    (
-                        read = await content.ReadAsync(
-                            buffer.AsMemory(0, buffer.Length),
-                            cancellationToken
-                        )
-                    ) > 0
-                )
+                if (encrypt)
                 {
-                    await fileStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
-                    md5.AppendData(buffer.AsSpan(0, read));
-                    size += read;
+                    await SseGcm.EncryptAsync(
+                        content,
+                        fileStream,
+                        _masterKey,
+                        chunk =>
+                        {
+                            md5.AppendData(chunk.Span);
+                            size += chunk.Length;
+                        },
+                        cancellationToken
+                    );
                 }
+                else
+                {
+                    var buffer = new byte[8192];
+                    int read;
+                    while (
+                        (
+                            read = await content.ReadAsync(
+                                buffer.AsMemory(0, buffer.Length),
+                                cancellationToken
+                            )
+                        ) > 0
+                    )
+                    {
+                        await fileStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                        md5.AppendData(buffer.AsSpan(0, read));
+                        size += read;
+                    }
+                }
+
+                // Durably flush object bytes to disk before publishing via rename.
+                fileStream.Flush(flushToDisk: true);
             }
             File.Move(tmpPath, finalPath, overwrite: true);
+            FsyncDirectory(dir);
         }
         catch
         {
@@ -942,7 +1034,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         );
         Stream finalStream = fileStream;
         if (metadata.Encryption == "AES256")
-            finalStream = CreateDecryptionStream(fileStream);
+            finalStream = SseGcm.CreateDecryptingStream(fileStream, _masterKey);
         return (metadata, finalStream);
     }
 
@@ -1485,29 +1577,18 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                     )
                 )
                 {
-                    Stream effectiveOutput = finalFileStream;
-                    if (encryption == "AES256")
-                    {
-                        var aes = Aes.Create();
-                        aes.Key = _masterKey;
-                        aes.GenerateIV();
-                        await finalFileStream.WriteAsync(
-                            aes.IV,
-                            0,
-                            aes.IV.Length,
-                            cancellationToken
-                        );
-                        effectiveOutput = new CryptoStream(
-                            finalFileStream,
-                            aes.CreateEncryptor(),
-                            CryptoStreamMode.Write
-                        );
-                    }
+                    // Authenticated streaming encryption at rest (when requested). The object
+                    // Size and ETag below are computed over the PLAINTEXT part bytes.
+                    var encryptor =
+                        encryption == "AES256"
+                            ? new SseGcm.GcmEncryptingWriter(finalFileStream, _masterKey)
+                            : null;
+
                     foreach (var part in partsList)
                     {
                         var partPath = Path.Combine(partsDir, part.PartNumber.ToString());
                         if (!File.Exists(partPath))
-                            throw new InvalidOperationException($"Part {part.PartNumber} missing.");
+                            throw new InvalidOperationException("InvalidPart");
                         using var partMd5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
                         await using var partStream = new FileStream(
                             partPath,
@@ -1525,19 +1606,28 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                             ) > 0
                         )
                         {
-                            await effectiveOutput.WriteAsync(
-                                buffer.AsMemory(0, read),
-                                cancellationToken
-                            );
+                            if (encryptor != null)
+                                await encryptor.WriteAsync(
+                                    buffer.AsMemory(0, read),
+                                    cancellationToken
+                                );
+                            else
+                                await finalFileStream.WriteAsync(
+                                    buffer.AsMemory(0, read),
+                                    cancellationToken
+                                );
                             partMd5.AppendData(buffer.AsSpan(0, read));
                             totalSize += read;
                         }
                         md5Concat.AppendData(partMd5.GetHashAndReset());
                     }
-                    if (effectiveOutput is CryptoStream cs)
-                        await cs.FlushFinalBlockAsync(cancellationToken);
+                    if (encryptor != null)
+                        await encryptor.FinishAsync(cancellationToken);
+                    // Durably flush the assembled object to disk before publishing it via rename.
+                    finalFileStream.Flush(flushToDisk: true);
                 }
                 File.Move(tmpPath, finalPath, overwrite: true);
+                FsyncDirectory(finalDir);
             }
             catch
             {

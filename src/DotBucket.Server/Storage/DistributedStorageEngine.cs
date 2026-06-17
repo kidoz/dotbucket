@@ -420,7 +420,10 @@ public class DistributedStorageEngine(
         CancellationToken cancellationToken = default
     ) => local.GetNotificationsAsync(bucketName, cancellationToken);
 
-    // Lifecycle configuration is local metadata, replicated like bucket metadata.
+    // NOTE: Lifecycle configuration is node-local and is NOT replicated to peers (unlike
+    // bucket existence/versioning/object-lock, which are replicated on write). A lifecycle
+    // policy set on one node only applies on that node. Apply it on every node, or front the
+    // cluster with sticky routing for configuration calls. See the cluster startup warning.
     public Task SetLifecycleAsync(
         string bucketName,
         LifecycleConfiguration config,
@@ -942,7 +945,13 @@ public class DistributedStorageEngine(
     }
 
     // ========================================================================
-    // Multipart: pinned to primary node, complete triggers replication
+    // Multipart uploads are NODE-LOCAL until completion.
+    //
+    // Initiate, every UploadPart, and Complete must all be served by the SAME node: the upload
+    // record and the staged parts live only on the node that received them — they are NOT
+    // replicated. Behind a load balancer this REQUIRES session affinity (sticky routing) keyed
+    // on the bucket/key or uploadId; without it, parts scatter across nodes and Complete fails
+    // with InvalidPart. Only the FINAL assembled object is replicated (see Complete below).
     // ========================================================================
 
     public async Task<string> InitiateMultipartUploadAsync(
@@ -954,7 +963,8 @@ public class DistributedStorageEngine(
         CancellationToken cancellationToken = default
     )
     {
-        // Always handle multipart locally — the complete step will replicate
+        // Staged node-locally; the caller must route all subsequent part/complete calls for
+        // this uploadId back to this same node (see the section comment above).
         return await local.InitiateMultipartUploadAsync(
             bucketName,
             objectKey,

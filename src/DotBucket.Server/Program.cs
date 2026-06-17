@@ -181,17 +181,25 @@ var app = builder.Build();
 // Surface non-fatal configuration warnings (fatal errors already aborted startup above).
 foreach (var warning in startupValidation.Warnings)
 {
-    app.Logger.LogCritical(
-        "Auth:RootAccessKey and Auth:RootSecretKey are using well-known default values. Change them immediately."
-    );
+    app.Logger.LogWarning("Configuration warning: {Warning}", warning);
 }
 
-// IAM state is node-local and not replicated; surface this loudly in cluster mode.
+// Several pieces of state are node-local and NOT replicated; surface these limitations loudly
+// in cluster mode so operators configure routing/automation accordingly.
 if (clusterConfig?.Enabled == true)
 {
     app.Logger.LogWarning(
         "Cluster mode is enabled, but IAM state (users, policies, access keys) lives in a node-local SQLite database and is NOT replicated. "
             + "Apply IAM changes to every node, or they will only take effect on the node that received them."
+    );
+    app.Logger.LogWarning(
+        "Cluster mode limitation: multipart uploads are node-local until completion. Initiate, every "
+            + "UploadPart, and CompleteMultipartUpload for a given upload MUST be routed to the same node. "
+            + "Configure session affinity (sticky routing) on your load balancer, or multipart completes will fail with InvalidPart."
+    );
+    app.Logger.LogWarning(
+        "Cluster mode limitation: bucket lifecycle and notification configuration are node-local and are NOT "
+            + "replicated. Apply them on every node (or via sticky routing), or they will only take effect on one node."
     );
 }
 

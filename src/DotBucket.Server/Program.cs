@@ -54,6 +54,9 @@ builder.Services.AddHostedService<LifecycleExpirationService>();
 builder.Services.Configure<StorageOptions>(
     builder.Configuration.GetSection(StorageOptions.SectionName)
 );
+var storageOptions =
+    builder.Configuration.GetSection(StorageOptions.SectionName).Get<StorageOptions>()
+    ?? new StorageOptions();
 
 // Configure S3 addressing/region options
 builder.Services.Configure<S3Options>(builder.Configuration.GetSection(S3Options.SectionName));
@@ -70,6 +73,24 @@ builder.Services.Configure<ClusterOptions>(
 var clusterConfig = builder
     .Configuration.GetSection(ClusterOptions.SectionName)
     .Get<ClusterOptions>();
+
+// Fail closed on fatal misconfiguration before wiring up services. Outside Development,
+// missing/weak credentials, an invalid encryption key, unsafe storage roots, or incomplete
+// cluster identity abort startup with a clear error instead of running in an unsafe state.
+var startupValidation = StartupValidator.Validate(
+    builder.Environment.IsDevelopment(),
+    authOptions,
+    storageOptions,
+    clusterConfig
+);
+if (startupValidation.Errors.Count > 0)
+{
+    var detail = string.Join(Environment.NewLine + "  - ", startupValidation.Errors);
+    throw new InvalidOperationException(
+        "Fatal configuration error(s); refusing to start:" + Environment.NewLine + "  - " + detail
+    );
+}
+
 if (clusterConfig?.Enabled == true)
 {
     builder.Services.AddSingleton<ClusterState>();
@@ -157,17 +178,8 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 
 var app = builder.Build();
 
-// Validate root credentials at startup
-if (
-    string.IsNullOrEmpty(authOptions.RootAccessKey)
-    || string.IsNullOrEmpty(authOptions.RootSecretKey)
-)
-{
-    app.Logger.LogCritical(
-        "Auth:RootAccessKey and Auth:RootSecretKey MUST be configured. Server is running without root credentials."
-    );
-}
-else if (authOptions.RootAccessKey == "minioadmin" || authOptions.RootSecretKey == "minioadmin")
+// Surface non-fatal configuration warnings (fatal errors already aborted startup above).
+foreach (var warning in startupValidation.Warnings)
 {
     app.Logger.LogCritical(
         "Auth:RootAccessKey and Auth:RootSecretKey are using well-known default values. Change them immediately."

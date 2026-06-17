@@ -389,6 +389,16 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         return prefix.Replace("!", "!!").Replace("%", "!%").Replace("_", "!_");
     }
 
+    /// <summary>
+    /// Compares two ETags ignoring surrounding quotes/whitespace and case, so a client-submitted
+    /// part ETag (e.g. <c>"abc..."</c>) matches the stored value regardless of quoting.
+    /// </summary>
+    private static bool ETagsEqual(string a, string b)
+    {
+        static string Normalize(string s) => s.Trim().Trim('"').Trim();
+        return string.Equals(Normalize(a), Normalize(b), StringComparison.OrdinalIgnoreCase);
+    }
+
     public async Task<Bucket> CreateBucketAsync(
         string bucketName,
         bool objectLock = false,
@@ -520,14 +530,31 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         CancellationToken cancellationToken = default
     )
     {
+        var bucket =
+            await GetBucketAsync(bucketName, cancellationToken)
+            ?? throw new InvalidOperationException("NoSuchBucket");
+
+        // S3 semantics: Object Lock can only be enabled at bucket creation. Once enabled it
+        // cannot be disabled. PutObjectLockConfiguration may only adjust the default retention
+        // on a bucket that was created with Object Lock enabled.
+        if (!bucket.ObjectLock.Enabled)
+            throw new InvalidOperationException("InvalidBucketState");
+
+        // Force Enabled to remain true; the only mutable part is the default retention rule.
+        var effective = new ObjectLockConfig
+        {
+            Enabled = true,
+            DefaultRetentionMode = config.DefaultRetentionMode,
+            DefaultRetentionDays = config.DefaultRetentionDays,
+        };
+
         using var connection = await OpenConnectionAsync(cancellationToken);
         using var command = connection.CreateCommand();
         command.CommandText =
-            "UPDATE buckets SET object_lock_enabled = $enabled, object_lock_config_json = $json WHERE name = $name";
-        command.Parameters.AddWithValue("$enabled", config.Enabled ? 1 : 0);
+            "UPDATE buckets SET object_lock_enabled = 1, object_lock_config_json = $json WHERE name = $name";
         command.Parameters.AddWithValue(
             "$json",
-            JsonSerializer.Serialize(config, StorageObjectJsonContext.Default.ObjectLockConfig)
+            JsonSerializer.Serialize(effective, StorageObjectJsonContext.Default.ObjectLockConfig)
         );
         command.Parameters.AddWithValue("$name", bucketName);
         await command.ExecuteNonQueryAsync(cancellationToken);
@@ -542,6 +569,27 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         CancellationToken cancellationToken = default
     )
     {
+        if (mode != "GOVERNANCE" && mode != "COMPLIANCE")
+            throw new InvalidOperationException("MalformedXML");
+
+        await EnsureBucketHasObjectLockAsync(bucketName, cancellationToken);
+
+        // The object/version must exist before applying retention.
+        var current =
+            await HeadObjectAsync(bucketName, objectKey, versionId, cancellationToken)
+            ?? throw new InvalidOperationException("NoSuchKey");
+
+        // COMPLIANCE retention is immutable: it cannot be lifted or shortened, and the mode
+        // cannot be downgraded to GOVERNANCE, until the retain-until date passes.
+        if (
+            current.LockStatus.RetentionMode == "COMPLIANCE"
+            && current.LockStatus.RetainUntilDate > DateTime.UtcNow
+            && (mode != "COMPLIANCE" || retainUntil < current.LockStatus.RetainUntilDate)
+        )
+        {
+            throw new InvalidOperationException("AccessDenied");
+        }
+
         using var connection = await OpenConnectionAsync(cancellationToken);
         using var command = connection.CreateCommand();
         var vid = versionId ?? "null";
@@ -552,7 +600,9 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         command.Parameters.AddWithValue("$bucket", bucketName);
         command.Parameters.AddWithValue("$key", objectKey);
         command.Parameters.AddWithValue("$vid", vid);
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        var affected = await command.ExecuteNonQueryAsync(cancellationToken);
+        if (affected == 0)
+            throw new InvalidOperationException("NoSuchKey");
     }
 
     public async Task SetObjectLegalHoldAsync(
@@ -563,6 +613,12 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         CancellationToken cancellationToken = default
     )
     {
+        await EnsureBucketHasObjectLockAsync(bucketName, cancellationToken);
+
+        _ =
+            await HeadObjectAsync(bucketName, objectKey, versionId, cancellationToken)
+            ?? throw new InvalidOperationException("NoSuchKey");
+
         using var connection = await OpenConnectionAsync(cancellationToken);
         using var command = connection.CreateCommand();
         var vid = versionId ?? "null";
@@ -572,7 +628,25 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         command.Parameters.AddWithValue("$bucket", bucketName);
         command.Parameters.AddWithValue("$key", objectKey);
         command.Parameters.AddWithValue("$vid", vid);
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        var affected = await command.ExecuteNonQueryAsync(cancellationToken);
+        if (affected == 0)
+            throw new InvalidOperationException("NoSuchKey");
+    }
+
+    /// <summary>
+    /// Object Lock retention and legal hold can only be applied on a bucket that was created
+    /// with Object Lock enabled. Throws "InvalidRequest" otherwise.
+    /// </summary>
+    private async Task EnsureBucketHasObjectLockAsync(
+        string bucketName,
+        CancellationToken cancellationToken
+    )
+    {
+        var bucket =
+            await GetBucketAsync(bucketName, cancellationToken)
+            ?? throw new InvalidOperationException("NoSuchBucket");
+        if (!bucket.ObjectLock.Enabled)
+            throw new InvalidOperationException("InvalidRequest");
     }
 
     public async Task SetNotificationsAsync(
@@ -1479,9 +1553,14 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         CancellationToken cancellationToken = default
     )
     {
+        if (partNumber < 1 || partNumber > 10000)
+            throw new InvalidOperationException("InvalidPart");
+
         var partPath = Path.Combine(GetPartsPath(bucketName, uploadId), partNumber.ToString());
         long size = 0;
-        using (var sha256 = SHA256.Create())
+        // S3 part ETags are the hex-encoded MD5 of the part bytes; clients validate the
+        // ETag they receive here against the one they submit on CompleteMultipartUpload.
+        using (var md5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5))
         using (
             var fileStream = new FileStream(
                 partPath,
@@ -1500,11 +1579,11 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             )
             {
                 await fileStream.WriteAsync(buffer, 0, read, cancellationToken);
-                sha256.TransformBlock(buffer, 0, read, null, 0);
+                md5.AppendData(buffer, 0, read);
                 size += read;
             }
-            sha256.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
-            var etag = $"\"{Convert.ToHexString(sha256.Hash!).ToLowerInvariant()}\"";
+            fileStream.Flush(flushToDisk: true);
+            var etag = $"\"{Convert.ToHexString(md5.GetHashAndReset()).ToLowerInvariant()}\"";
             using var connection = await OpenConnectionAsync(cancellationToken);
             using var command = connection.CreateCommand();
             command.CommandText =
@@ -1536,7 +1615,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             uploadCmd.Parameters.AddWithValue("$id", uploadId);
             using var uploadReader = await uploadCmd.ExecuteReaderAsync(cancellationToken);
             if (!await uploadReader.ReadAsync(cancellationToken))
-                throw new InvalidOperationException("Upload not found.");
+                throw new InvalidOperationException("NoSuchUpload");
             var contentType = uploadReader.GetString(uploadReader.GetOrdinal("content_type"));
             var metaJson = uploadReader.GetString(uploadReader.GetOrdinal("metadata_json"));
             var encryption = uploadReader.IsDBNull(uploadReader.GetOrdinal("encryption"))
@@ -1561,7 +1640,51 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                 Directory.CreateDirectory(finalDir);
             var partsDir = GetPartsPath(bucketName, uploadId);
             long totalSize = 0;
-            var partsList = parts.OrderBy(p => p.PartNumber).ToList();
+
+            // Validate the client-submitted parts contract against the parts we actually
+            // stored, following S3 rules, BEFORE assembling the final object.
+            var partsList = parts.ToList();
+            if (partsList.Count == 0)
+                throw new InvalidOperationException("MalformedXML");
+
+            // Part numbers must be present, in strictly ascending order.
+            for (var i = 0; i < partsList.Count; i++)
+            {
+                if (partsList[i].PartNumber < 1 || partsList[i].PartNumber > 10000)
+                    throw new InvalidOperationException("InvalidPart");
+                if (i > 0 && partsList[i].PartNumber <= partsList[i - 1].PartNumber)
+                    throw new InvalidOperationException("InvalidPartOrder");
+            }
+
+            // Load the parts we actually persisted (etag + size) for this upload.
+            var storedParts = new Dictionary<int, (string ETag, long Size)>();
+            using (var partsQuery = connection.CreateCommand())
+            {
+                partsQuery.CommandText =
+                    "SELECT part_number, etag, size FROM parts WHERE upload_id = $id";
+                partsQuery.Parameters.AddWithValue("$id", uploadId);
+                using var pr = await partsQuery.ExecuteReaderAsync(cancellationToken);
+                while (await pr.ReadAsync(cancellationToken))
+                    storedParts[pr.GetInt32(0)] = (pr.GetString(1), pr.GetInt64(2));
+            }
+
+            // Every submitted part must exist and its ETag must match what we stored.
+            foreach (var part in partsList)
+            {
+                if (!storedParts.TryGetValue(part.PartNumber, out var stored))
+                    throw new InvalidOperationException("InvalidPart");
+                if (!ETagsEqual(part.ETag, stored.ETag))
+                    throw new InvalidOperationException("InvalidPart");
+            }
+
+            // S3 requires every part except the last to be at least 5 MiB.
+            const long minPartSize = 5L * 1024 * 1024;
+            for (var i = 0; i < partsList.Count - 1; i++)
+            {
+                if (storedParts[partsList[i].PartNumber].Size < minPartSize)
+                    throw new InvalidOperationException("EntityTooSmall");
+            }
+
             var tmpPath = finalPath + $".{Guid.NewGuid():N}.tmp";
             using var md5Concat = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
             try

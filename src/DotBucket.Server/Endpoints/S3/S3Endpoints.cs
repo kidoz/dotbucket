@@ -33,6 +33,53 @@ public static class S3Endpoints
     /// </summary>
     internal static bool IsReservedBucketNamePublic(string bucket) => IsReservedBucketName(bucket);
 
+    /// <summary>
+    /// Maps a storage-engine <see cref="InvalidOperationException"/> (whose Message is an S3
+    /// error code) to the appropriate S3 XML error response. Returns false if the message is
+    /// not a recognized code, so callers can rethrow/return 500.
+    /// </summary>
+    private static async Task<bool> TryMapStorageErrorAsync(
+        HttpContext context,
+        InvalidOperationException ex
+    )
+    {
+        switch (ex.Message)
+        {
+            case "NoSuchKey":
+                await S3ErrorResponses.NoSuchKeyAsync(context);
+                return true;
+            case "NoSuchBucket":
+                await S3ErrorResponses.NoSuchBucketAsync(context);
+                return true;
+            case "InvalidBucketState":
+                await S3ErrorResponses.InvalidBucketStateAsync(context);
+                return true;
+            case "InvalidRequest":
+                await S3ErrorResponses.InvalidRequestAsync(context);
+                return true;
+            case "AccessDenied":
+                await S3ErrorResponses.AccessDeniedAsync(context);
+                return true;
+            case "MalformedXML":
+                await S3ErrorResponses.MalformedXmlAsync(context);
+                return true;
+            case "EntityTooSmall":
+                await S3ErrorResponses.EntityTooSmallAsync(context);
+                return true;
+            case "InvalidPart":
+                await S3ErrorResponses.InvalidPartAsync(context);
+                return true;
+            case "InvalidPartOrder":
+                await S3ErrorResponses.InvalidPartOrderAsync(context);
+                return true;
+            case "NoSuchUpload":
+                await S3ErrorResponses.NoSuchUploadAsync(context);
+                return true;
+            default:
+                return false;
+        }
+    }
+
     private static async Task<IResult> WriteInvalidSseHeaderAsync(HttpContext context)
     {
         await S3ErrorResponses.WriteErrorAsync(
@@ -154,11 +201,20 @@ public static class S3Endpoints
                             : null,
                     };
 
-                    await storageEngine.SetObjectLockConfigAsync(
-                        bucket,
-                        config,
-                        context.RequestAborted
-                    );
+                    try
+                    {
+                        await storageEngine.SetObjectLockConfigAsync(
+                            bucket,
+                            config,
+                            context.RequestAborted
+                        );
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        if (await TryMapStorageErrorAsync(context, ex))
+                            return Results.Empty;
+                        throw;
+                    }
                     return Results.Ok();
                 }
 
@@ -222,9 +278,20 @@ public static class S3Endpoints
                     return Results.Ok();
                 }
 
+                // Object Lock can only be enabled at bucket creation (S3 semantics).
+                var objectLockEnabled = string.Equals(
+                    context.Request.Headers["x-amz-bucket-object-lock-enabled"].ToString(),
+                    "true",
+                    StringComparison.OrdinalIgnoreCase
+                );
+
                 try
                 {
-                    await storageEngine.CreateBucketAsync(bucket, false, context.RequestAborted);
+                    await storageEngine.CreateBucketAsync(
+                        bucket,
+                        objectLockEnabled,
+                        context.RequestAborted
+                    );
                     context.Response.Headers.Location = $"/{bucket}";
                     return Results.Ok();
                 }
@@ -631,14 +698,23 @@ public static class S3Endpoints
                         doc.Root?.Element(ns + "RetainUntilDate")?.Value
                             ?? DateTime.UtcNow.ToString()
                     );
-                    await storageEngine.SetObjectRetentionAsync(
-                        bucket,
-                        key,
-                        versionId,
-                        mode,
-                        date,
-                        context.RequestAborted
-                    );
+                    try
+                    {
+                        await storageEngine.SetObjectRetentionAsync(
+                            bucket,
+                            key,
+                            versionId,
+                            mode,
+                            date,
+                            context.RequestAborted
+                        );
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        if (await TryMapStorageErrorAsync(context, ex))
+                            return Results.Empty;
+                        throw;
+                    }
                     return Results.Ok();
                 }
 
@@ -650,29 +726,47 @@ public static class S3Endpoints
                     var doc = XDocument.Parse(xml);
                     var ns = doc.Root?.Name.Namespace ?? XNamespace.None;
                     var hold = doc.Root?.Element(ns + "Status")?.Value == "ON";
-                    await storageEngine.SetObjectLegalHoldAsync(
-                        bucket,
-                        key,
-                        versionId,
-                        hold,
-                        context.RequestAborted
-                    );
+                    try
+                    {
+                        await storageEngine.SetObjectLegalHoldAsync(
+                            bucket,
+                            key,
+                            versionId,
+                            hold,
+                            context.RequestAborted
+                        );
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        if (await TryMapStorageErrorAsync(context, ex))
+                            return Results.Empty;
+                        throw;
+                    }
                     return Results.Ok();
                 }
 
                 // Multipart: Upload Part
                 if (uploadId != null && partNumber != null)
                 {
-                    var etag = await storageEngine.UploadPartAsync(
-                        bucket,
-                        key,
-                        uploadId,
-                        partNumber.Value,
-                        context.Request.Body,
-                        context.RequestAborted
-                    );
-                    context.Response.Headers.ETag = etag;
-                    return Results.Ok();
+                    try
+                    {
+                        var etag = await storageEngine.UploadPartAsync(
+                            bucket,
+                            key,
+                            uploadId,
+                            partNumber.Value,
+                            context.Request.Body,
+                            context.RequestAborted
+                        );
+                        context.Response.Headers.ETag = etag;
+                        return Results.Ok();
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        if (await TryMapStorageErrorAsync(context, ex))
+                            return Results.Empty;
+                        throw;
+                    }
                 }
 
                 // CopyObject
@@ -874,13 +968,23 @@ public static class S3Endpoints
                             .ToList()
                         ?? new();
 
-                    var obj = await storageEngine.CompleteMultipartUploadAsync(
-                        bucket,
-                        key,
-                        uploadId,
-                        parts,
-                        context.RequestAborted
-                    );
+                    StorageObject obj;
+                    try
+                    {
+                        obj = await storageEngine.CompleteMultipartUploadAsync(
+                            bucket,
+                            key,
+                            uploadId,
+                            parts,
+                            context.RequestAborted
+                        );
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        if (await TryMapStorageErrorAsync(context, ex))
+                            return Results.Empty;
+                        throw;
+                    }
 
                     var settings = new XmlWriterSettings
                     {

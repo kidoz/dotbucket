@@ -75,6 +75,49 @@ public static class S3ErrorResponses
             "The lifecycle configuration does not exist."
         );
 
+    public static Task InvalidBucketStateAsync(HttpContext context, string? message = null) =>
+        WriteErrorAsync(
+            context,
+            409,
+            "InvalidBucketState",
+            message ?? "Object Lock configuration cannot be enabled on existing buckets."
+        );
+
+    public static Task InvalidRequestAsync(HttpContext context, string? message = null) =>
+        WriteErrorAsync(
+            context,
+            400,
+            "InvalidRequest",
+            message ?? "Bucket is missing Object Lock Configuration."
+        );
+
+    public static Task EntityTooSmallAsync(HttpContext context, string? message = null) =>
+        WriteErrorAsync(
+            context,
+            400,
+            "EntityTooSmall",
+            message
+                ?? "Your proposed upload is smaller than the minimum allowed object size for a multipart part."
+        );
+
+    public static Task InvalidPartAsync(HttpContext context, string? message = null) =>
+        WriteErrorAsync(
+            context,
+            400,
+            "InvalidPart",
+            message
+                ?? "One or more of the specified parts could not be found or the part ETag did not match."
+        );
+
+    public static Task InvalidPartOrderAsync(HttpContext context, string? message = null) =>
+        WriteErrorAsync(
+            context,
+            400,
+            "InvalidPartOrder",
+            message
+                ?? "The list of parts was not in ascending order; parts must be ordered by part number."
+        );
+
     public static Task MalformedXmlAsync(HttpContext context, string? message = null) =>
         WriteErrorAsync(
             context,

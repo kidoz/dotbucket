@@ -36,6 +36,7 @@ public class SigV4UnchunkingStream : Stream
     private const string EmptySha256 =
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     private const int MaxHeaderLineLength = 4096;
+    private const int LineBufferSize = 4096;
 
     private readonly Stream _inner;
     private readonly long _expectedDecodedLength;
@@ -48,6 +49,14 @@ public class SigV4UnchunkingStream : Stream
     private string _previousSignature;
     private string _currentChunkSignature = "";
     private IncrementalHash? _chunkHash;
+
+    // Buffered reader state for chunk framing lines. The wire format is short
+    // text lines terminated by \r\n, so reading one byte at a time via _inner
+    // was a syscall-per-byte cliff. We pull up to LineBufferSize bytes at a
+    // time into _lineBuffer and drain it line-by-line.
+    private readonly byte[] _lineBuffer = new byte[LineBufferSize];
+    private int _lineBufferOffset;
+    private int _lineBufferCount;
 
     public SigV4UnchunkingStream(
         Stream inner,
@@ -92,7 +101,27 @@ public class SigV4UnchunkingStream : Stream
         }
 
         int toRead = (int)Math.Min((long)buffer.Length, _remainingInChunk);
-        int read = await _inner.ReadAsync(buffer[..toRead], cancellationToken);
+
+        // Drain any payload bytes that were prefetched into the framing line
+        // buffer first; only then read fresh bytes from the inner stream. The
+        // line buffer is refilled in 4 KiB chunks during ReadLineAsync, so it
+        // frequently holds the start of the next chunk's data.
+        int read = 0;
+        if (_lineBufferOffset < _lineBufferCount)
+        {
+            read = Math.Min(toRead, _lineBufferCount - _lineBufferOffset);
+            new Span<byte>(_lineBuffer, _lineBufferOffset, read).CopyTo(buffer.Span[..read]);
+            _lineBufferOffset += read;
+        }
+
+        if (read < toRead)
+        {
+            int fromInner = await _inner.ReadAsync(buffer[read..toRead], cancellationToken);
+            if (fromInner == 0 && read == 0 && toRead > 0)
+                throw new SigV4StreamingException("Unexpected end of stream inside a chunk.");
+            read += fromInner;
+        }
+
         if (read == 0 && toRead > 0)
             throw new SigV4StreamingException("Unexpected end of stream inside a chunk.");
 
@@ -300,22 +329,41 @@ public class SigV4UnchunkingStream : Stream
         var sb = new StringBuilder();
         while (true)
         {
-            var buffer = new byte[1];
-            int read = await _inner.ReadAsync(buffer, ct);
-            if (read == 0)
+            // Refill the line buffer when drained.
+            if (_lineBufferOffset >= _lineBufferCount)
             {
-                if (allowEof || sb.Length == 0)
-                    return sb.ToString();
-                throw new SigV4StreamingException("Unexpected end of stream inside chunk framing.");
+                _lineBufferOffset = 0;
+                _lineBufferCount = await _inner.ReadAsync(
+                    _lineBuffer.AsMemory(0, LineBufferSize),
+                    ct
+                );
+                if (_lineBufferCount == 0)
+                {
+                    if (allowEof || sb.Length == 0)
+                        return sb.ToString();
+                    throw new SigV4StreamingException(
+                        "Unexpected end of stream inside chunk framing."
+                    );
+                }
             }
 
-            char c = (char)buffer[0];
-            sb.Append(c);
-            if (sb.Length >= 2 && sb[sb.Length - 2] == '\r' && sb[sb.Length - 1] == '\n')
-            {
-                sb.Length -= 2;
+            // Scan the buffered bytes up to the next \n (inclusive).
+            var span = _lineBuffer.AsSpan(_lineBufferOffset, _lineBufferCount - _lineBufferOffset);
+            var newlineIdx = span.IndexOf((byte)'\n');
+            var segmentLength = newlineIdx < 0 ? span.Length : newlineIdx + 1;
+            var segment = span[..segmentLength];
+
+            // Strip a trailing \r\n (or a bare \n) from the appended segment.
+            var trim = segment.Length > 0 && segment[^1] == (byte)'\n' ? 1 : 0;
+            if (trim == 1 && segment.Length > 1 && segment[^2] == (byte)'\r')
+                trim = 2;
+
+            sb.Append(Encoding.ASCII.GetString(segment[..^trim]));
+            _lineBufferOffset += segmentLength;
+
+            if (newlineIdx >= 0)
                 return sb.ToString();
-            }
+
             if (sb.Length > MaxHeaderLineLength)
                 throw new SigV4StreamingException("Chunk framing line exceeds maximum length.");
         }

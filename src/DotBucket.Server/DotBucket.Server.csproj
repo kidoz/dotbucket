@@ -13,9 +13,27 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.9" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
-    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.16.0" />
-    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.16.0" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.17.0" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.17.0" />
+  </ItemGroup>
+
+  <!--
+    Transitive overrides (see .agents/contexts/security/DEPENDENCY_POLICY.md).
+
+      * SQLitePCLRaw.lib.e_sqlite3 (via Microsoft.Data.Sqlite): GHSA-2m69-gcr7-jv3q (high).
+        Pinned to the 3.x line; this is the SQLite native binder used by Microsoft.Data.Sqlite.
+      * Microsoft.OpenApi (via Microsoft.AspNetCore.OpenApi): GHSA-v5pm-xwqc-g5wc (high,
+        DoS via circular schema refs in OpenAPI document parsing). Patched in 2.7.5+ on the
+        2.x line. The 3.x line is NOT compatible with Microsoft.AspNetCore.OpenApi 10.0.x
+        (its source generator emits assignments to the read-only IOpenApiMediaType.Example).
+        In DotBucket OpenAPI is exposed only in Development (Program.cs MapOpenApi gate),
+        so production is not on the vulnerable code path; the bump still removes the
+        surface and keeps NuGet audit clean.
+  -->
+  <ItemGroup>
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.53.3" />
+    <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />
   </ItemGroup>
 </Project>

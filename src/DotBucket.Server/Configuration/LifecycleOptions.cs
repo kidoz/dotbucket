@@ -26,4 +26,20 @@ public class LifecycleOptions
     /// pass. The pass re-queries until a batch is smaller than this. Default 500.
     /// </summary>
     public int BatchSize { get; set; } = 500;
+
+    /// <summary>
+    /// When true, the multipart-upload reaper periodically aborts in-progress
+    /// uploads older than <see cref="AbortedMultipartUploadRetentionDays"/>.
+    /// Closes the disk-leak vector where a client initiates uploads and never
+    /// completes or aborts them (each abandoned upload holds a parts directory
+    /// on disk with no TTL). Default true.
+    /// </summary>
+    public bool ReaperEnabled { get; set; } = true;
+
+    /// <summary>
+    /// In-progress multipart uploads older than this many days are aborted by
+    /// the reaper. Default 1. Set to 0 to abort every in-progress upload on
+    /// each scan (useful for tests).
+    /// </summary>
+    public int AbortedMultipartUploadRetentionDays { get; set; } = 1;
 }

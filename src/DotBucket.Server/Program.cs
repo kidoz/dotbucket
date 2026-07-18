@@ -50,6 +50,9 @@ builder.Services.AddSingleton<NotificationDispatcher>();
 // Background lifecycle/expiration worker (self-gates on config + cluster mode)
 builder.Services.AddHostedService<LifecycleExpirationService>();
 
+// Background reaper for abandoned multipart uploads (self-gates on config + cluster mode)
+builder.Services.AddHostedService<MultipartUploadReaperService>();
+
 // Configure Storage Engine
 builder.Services.Configure<StorageOptions>(
     builder.Configuration.GetSection(StorageOptions.SectionName)

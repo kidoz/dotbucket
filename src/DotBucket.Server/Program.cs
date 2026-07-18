@@ -212,6 +212,53 @@ app.UseHttpsRedirection();
 
 app.UseCors("AllowFrontend");
 
+// Content-Security-Policy: defense-in-depth against XSS in the admin SPA.
+// The SPA loads only same-origin scripts/styles/images and the React module
+// entry; there are no inline scripts/styles to allow. S3 clients are unaffected
+// (they do not interpret response headers). 'connect-src' restricts XHR/fetch
+// to same-origin; if you add an external OTLP/console endpoint, extend this.
+app.Use(
+    async (context, next) =>
+    {
+        context.Response.OnStarting(() =>
+        {
+            // Don't apply to S3 object responses (presigned downloads etc.) —
+            // those are opaque bytes and adding a CSP can confuse browsers
+            // into blocking downloads in some edge cases. Limit to admin/SPA/health.
+            var path = context.Request.Path.Value ?? string.Empty;
+            var isHtmlSurface =
+                path.StartsWith("/admin", StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith("/health", StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith("/assets", StringComparison.OrdinalIgnoreCase)
+                || path.Equals("/", StringComparison.Ordinal)
+                || path.Equals("/index.html", StringComparison.OrdinalIgnoreCase)
+                || path.Equals("/dotbucket-logo.svg", StringComparison.OrdinalIgnoreCase)
+                || path.Equals("/favicon.ico", StringComparison.OrdinalIgnoreCase)
+                || path.Equals("/robots.txt", StringComparison.OrdinalIgnoreCase);
+
+            if (isHtmlSurface && !context.Response.Headers.ContainsKey("Content-Security-Policy"))
+            {
+                context.Response.Headers.ContentSecurityPolicy =
+                    "default-src 'self'; "
+                    + "script-src 'self'; "
+                    + "style-src 'self'; "
+                    + "img-src 'self' data:; "
+                    + "font-src 'self'; "
+                    + "connect-src 'self'; "
+                    + "frame-ancestors 'none'; "
+                    + "base-uri 'self'; "
+                    + "form-action 'self'; "
+                    + "object-src 'none'";
+                context.Response.Headers.XContentTypeOptions = "nosniff";
+                context.Response.Headers["Referrer-Policy"] = "no-referrer";
+            }
+
+            return Task.CompletedTask;
+        });
+        await next();
+    }
+);
+
 // Map OpenAPI endpoint (Development only)
 if (app.Environment.IsDevelopment())
 {

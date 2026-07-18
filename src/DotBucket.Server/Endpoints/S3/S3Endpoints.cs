@@ -175,7 +175,12 @@ public static class S3Endpoints
         // All S3 endpoints require authentication via the S3AuthRequiredFilter.
         // This is the final defense layer — even if middleware is bypassed or misconfigured,
         // no S3 endpoint will serve content without a validated AccessKey in context.
-        var s3 = app.MapGroup("").AddEndpointFilter<S3AuthRequiredFilter>();
+        // RequireRateLimiting("s3") applies the per-access-key token bucket declared
+        // in Program.cs; it is a no-op when RateLimit:Enabled is false (no limiter
+        // is registered in that case, and unmatched policies are tolerated).
+        var s3 = app.MapGroup("")
+            .AddEndpointFilter<S3AuthRequiredFilter>()
+            .RequireRateLimiting("s3");
 
         s3.MapPut(
             "/{bucket}",

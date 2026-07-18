@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Text;
+using System.Threading.RateLimiting;
 using System.Xml;
 using System.Xml.Linq;
 using DotBucket.Server.Auth;
@@ -63,6 +65,11 @@ var storageOptions =
 
 // Configure S3 addressing/region options
 builder.Services.Configure<S3Options>(builder.Configuration.GetSection(S3Options.SectionName));
+
+// Configure rate limiting (S3 per access key, admin per client IP)
+builder.Services.Configure<RateLimitOptions>(
+    builder.Configuration.GetSection(RateLimitOptions.SectionName)
+);
 
 // Configure lifecycle/expiration options
 builder.Services.Configure<LifecycleOptions>(
@@ -131,6 +138,82 @@ builder.Services.AddScoped<AdminTokenEndpointFilter>();
 
 // Add Native AOT-safe OpenAPI documentation (.NET 10 feature)
 builder.Services.AddOpenApi();
+
+// Rate limiting: two named token-bucket policies. The "s3" policy partitions
+// per authenticated access key (HttpContext.Items["AccessKey"], set by
+// SigV4Authenticator) with a fallback to client IP; the "admin" policy
+// partitions per client IP. /health and /_internal are exempt because the
+// limiter is wired inside the S3 UseWhen branch and admin groups attach the
+// policy explicitly (see MapAdminEndpoints / MapIamEndpoints).
+//
+// The policies are always registered so endpoint groups can statically declare
+// RequireRateLimiting("...") without throwing when RateLimit:Enabled is false.
+// Enforcement is gated on app.UseRateLimiter() being added to the pipeline,
+// which only happens when Enabled is true.
+var rateLimitOptions =
+    builder.Configuration.GetSection(RateLimitOptions.SectionName).Get<RateLimitOptions>()
+    ?? new RateLimitOptions();
+
+builder.Services.AddRateLimiter(limiterOptions =>
+{
+    limiterOptions.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    limiterOptions.OnRejected = (ctx, _) =>
+    {
+        if (ctx.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+        {
+            ctx.HttpContext.Response.Headers.RetryAfter = retryAfter.TotalSeconds.ToString(
+                CultureInfo.InvariantCulture
+            );
+        }
+        return ValueTask.CompletedTask;
+    };
+
+    // S3 surface: per access key, falls back to client IP.
+    limiterOptions.AddPolicy(
+        "s3",
+        httpContext =>
+        {
+            var accessKey = httpContext.Items.TryGetValue("AccessKey", out var ak)
+                ? ak as string
+                : null;
+            var partition =
+                accessKey ?? httpContext.Connection.RemoteIpAddress?.ToString() ?? "anon";
+            return RateLimitPartition.GetTokenBucketLimiter(
+                partition,
+                _ => new TokenBucketRateLimiterOptions
+                {
+                    TokenLimit = rateLimitOptions.S3Burst,
+                    TokensPerPeriod = rateLimitOptions.S3PermitPerSecond,
+                    ReplenishmentPeriod = TimeSpan.FromSeconds(1),
+                    QueueLimit = rateLimitOptions.S3Burst,
+                    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                    AutoReplenishment = true,
+                }
+            );
+        }
+    );
+
+    // Admin/IAM surface: per client IP.
+    limiterOptions.AddPolicy(
+        "admin",
+        httpContext =>
+        {
+            var partition = httpContext.Connection.RemoteIpAddress?.ToString() ?? "anon";
+            return RateLimitPartition.GetTokenBucketLimiter(
+                partition,
+                _ => new TokenBucketRateLimiterOptions
+                {
+                    TokenLimit = rateLimitOptions.AdminBurst,
+                    TokensPerPeriod = rateLimitOptions.AdminPermitPerSecond,
+                    ReplenishmentPeriod = TimeSpan.FromSeconds(1),
+                    QueueLimit = rateLimitOptions.AdminBurst,
+                    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                    AutoReplenishment = true,
+                }
+            );
+        }
+    );
+});
 
 // OpenTelemetry traces + metrics, exported via OTLP. Enabled only when an endpoint is
 // configured (Observability:OtlpEndpoint or the standard OTEL_EXPORTER_OTLP_ENDPOINT).
@@ -286,6 +369,15 @@ app.UseWhen(
     appBuilder =>
     {
         appBuilder.UseMiddleware<S3AuthMiddleware>();
+        // Rate limiting runs AFTER auth so the "s3" policy can partition on
+        // the authenticated access key (HttpContext.Items["AccessKey"]). Activating
+        // UseRateLimiter here (rather than globally) auto-exempts /admin, /health,
+        // /_internal, /assets because those paths are excluded from this UseWhen
+        // branch. The "s3" policy is attached to MapS3Endpoints below.
+        if (rateLimitOptions.Enabled)
+        {
+            appBuilder.UseRateLimiter();
+        }
         // Runs AFTER signature verification so rewriting the path to inject the bucket
         // (for virtual-hosted-style requests) cannot invalidate the SigV4 signature.
         appBuilder.UseMiddleware<VirtualHostMiddleware>();

@@ -37,7 +37,8 @@ public static class AdminEndpoints
     {
         var group = app.MapGroup("/admin")
             .WithTags("Admin API")
-            .AddEndpointFilter<AdminTokenEndpointFilter>();
+            .AddEndpointFilter<AdminTokenEndpointFilter>()
+            .RequireRateLimiting("admin");
 
         // List Buckets
         group.MapGet(

@@ -13,7 +13,8 @@ public static class IamEndpoints
     {
         var group = app.MapGroup("/admin/iam")
             .WithTags("IAM API")
-            .AddEndpointFilter<AdminTokenEndpointFilter>();
+            .AddEndpointFilter<AdminTokenEndpointFilter>()
+            .RequireRateLimiting("admin");
 
         // --- Users ---
 

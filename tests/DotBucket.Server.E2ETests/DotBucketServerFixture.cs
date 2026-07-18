@@ -49,6 +49,10 @@ public sealed class DotBucketServerFixture : IAsyncLifetime
                 ["Auth__AdminToken"] = AdminToken,
                 ["Storage__RootPath"] = _storageRoot,
                 ["Storage__MasterKey"] = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)),
+                // Disable the disk-space guard for E2E: dev machines running the
+                // suite may have less than the production 5% free threshold, and
+                // the guard's behavior is covered by DiskSpaceTests directly.
+                ["Storage__MinFreeSpacePercent"] = "0",
             },
         };
 

@@ -1122,4 +1122,10 @@ public class DistributedStorageEngine(
         string uploadId,
         CancellationToken cancellationToken = default
     ) => local.ListPartsAsync(bucketName, objectKey, uploadId, cancellationToken);
+
+    /// <summary>
+    /// Delegates to the local engine — on each node, the storage root is the
+    /// node-local data directory. Used by the /health readiness probe.
+    /// </summary>
+    public string GetStorageRoot() => local.GetStorageRoot();
 }

@@ -80,6 +80,31 @@ public static class S3Endpoints
         }
     }
 
+    /// <summary>
+    /// Maps a <see cref="StorageWriteException"/> to the right S3 response:
+    /// disk-full / low-disk-space → HTTP 507 InsufficientStorage; any other
+    /// IO failure → HTTP 500 InternalError. Returns true when mapped.
+    /// </summary>
+    private static async Task<bool> TryMapStorageWriteErrorAsync(
+        HttpContext context,
+        StorageWriteException ex
+    )
+    {
+        switch (ex.Code)
+        {
+            case StorageWriteErrorCodes.DiskFull:
+            case StorageWriteErrorCodes.LowDiskSpace:
+                await S3ErrorResponses.InsufficientStorageAsync(context, ex.Message);
+                return true;
+            case StorageWriteErrorCodes.IoError:
+                await S3ErrorResponses.InternalErrorAsync(context, ex.Message);
+                return true;
+            default:
+                await S3ErrorResponses.InternalErrorAsync(context, ex.Message);
+                return true;
+        }
+    }
+
     private static async Task<IResult> WriteInvalidSseHeaderAsync(HttpContext context)
     {
         await S3ErrorResponses.WriteErrorAsync(
@@ -761,6 +786,12 @@ public static class S3Endpoints
                         context.Response.Headers.ETag = etag;
                         return Results.Ok();
                     }
+                    catch (StorageWriteException ex)
+                    {
+                        if (await TryMapStorageWriteErrorAsync(context, ex))
+                            return Results.Empty;
+                        throw;
+                    }
                     catch (InvalidOperationException ex)
                     {
                         if (await TryMapStorageErrorAsync(context, ex))
@@ -852,15 +883,25 @@ public static class S3Endpoints
                     }
                 }
 
-                var putResult = await storageEngine.PutObjectAsync(
-                    bucket,
-                    key,
-                    context.Request.Body,
-                    contentType,
-                    metadata,
-                    encryption,
-                    context.RequestAborted
-                );
+                StorageObject putResult;
+                try
+                {
+                    putResult = await storageEngine.PutObjectAsync(
+                        bucket,
+                        key,
+                        context.Request.Body,
+                        contentType,
+                        metadata,
+                        encryption,
+                        context.RequestAborted
+                    );
+                }
+                catch (StorageWriteException ex)
+                {
+                    if (await TryMapStorageWriteErrorAsync(context, ex))
+                        return Results.Empty;
+                    throw;
+                }
 
                 context.Response.Headers.ETag = putResult.ETag;
                 if (!string.IsNullOrEmpty(putResult.Encryption))
@@ -978,6 +1019,12 @@ public static class S3Endpoints
                             parts,
                             context.RequestAborted
                         );
+                    }
+                    catch (StorageWriteException ex)
+                    {
+                        if (await TryMapStorageWriteErrorAsync(context, ex))
+                            return Results.Empty;
+                        throw;
                     }
                     catch (InvalidOperationException ex)
                     {

@@ -30,7 +30,7 @@ public record AdminBucketListResponse(IEnumerable<Bucket> Buckets);
 
 public record AdminObjectListResponse(List<StorageObject> Objects, int TotalCount);
 
-public record AdminHealthResponse(string Status);
+public record AdminHealthResponse(string Status, string? Reason = null);
 
 public record AdminVersioningResponse(string Status);
 

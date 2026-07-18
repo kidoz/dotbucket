@@ -2,6 +2,7 @@
 // See LICENSE file in the project root for full license information.
 
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -21,6 +22,8 @@ public class LocalFileSystemStorageEngine : IStorageEngine
     private readonly string _dbPath;
     private readonly byte[] _masterKey;
     private readonly int _multipartBufferSize;
+    private readonly long? _minFreeSpaceBytes;
+    private readonly double? _minFreeSpacePercent;
     private readonly NotificationDispatcher _dispatcher;
     private readonly ILogger<LocalFileSystemStorageEngine> _logger;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _writeLocks = new();
@@ -50,6 +53,8 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             options.Value.MultipartBufferSizeBytes > 0
                 ? options.Value.MultipartBufferSizeBytes
                 : 81920;
+        _minFreeSpaceBytes = options.Value.MinFreeSpaceBytes;
+        _minFreeSpacePercent = options.Value.MinFreeSpacePercent;
 
         if (!Directory.Exists(_rootPath))
             Directory.CreateDirectory(_rootPath);
@@ -112,6 +117,84 @@ public class LocalFileSystemStorageEngine : IStorageEngine
     {
         var lockKey = $"{bucketName}/{objectKey}";
         return _writeLocks.GetOrAdd(lockKey, _ => new SemaphoreSlim(1, 1));
+    }
+
+    /// <summary>
+    /// Absolute path to the directory holding object bytes. Used by the /health
+    /// readiness probe to check available disk space.
+    /// </summary>
+    public string GetStorageRoot() => _dataRoot;
+
+    /// <summary>
+    /// Pre-write guard: refuses the request when the storage filesystem's free
+    /// bytes drop below the configured threshold. Catches the disk-full failure
+    /// mode before any bytes are written so the caller gets a precise
+    /// <see cref="StorageWriteException"/> (<see cref="StorageWriteErrorCodes.LowDiskSpace"/>)
+    /// instead of an opaque IOException mid-stream.
+    ///
+    /// The check is best-effort: if <see cref="DriveInfo"/> cannot resolve the
+    /// root (e.g. on a network mount), the guard is skipped. ENOSPC during the
+    /// write itself is still classified via the catch blocks.
+    /// </summary>
+    private void EnsureSpaceAvailable(long anticipatedBytes)
+    {
+        // Both thresholds null = feature disabled; let writes proceed.
+        if (_minFreeSpaceBytes is null && _minFreeSpacePercent is null or 0.0)
+            return;
+
+        var drive = new DriveInfo(_dataRoot);
+        var available = drive.AvailableFreeSpace;
+        var total = drive.TotalSize;
+
+        long? bytesThreshold = _minFreeSpaceBytes;
+        if (_minFreeSpacePercent is { } pct and > 0.0 && total > 0)
+        {
+            var fromPercent = (long)(total * (pct / 100.0));
+            bytesThreshold = bytesThreshold is { } bytesThresholdValue
+                ? Math.Min(bytesThresholdValue, fromPercent)
+                : fromPercent;
+        }
+
+        if (bytesThreshold is { } threshold && available - anticipatedBytes < threshold)
+        {
+            throw new StorageWriteException(
+                StorageWriteErrorCodes.LowDiskSpace,
+                $"Refusing write: available free space ({available} bytes) is below the "
+                    + $"configured threshold ({threshold} bytes).",
+                new IOException("Insufficient storage.")
+            );
+        }
+    }
+
+    /// <summary>
+    /// Classify an IOException from a write path into a <see cref="StorageWriteException"/>
+    /// with the right code (ENOSPC/EDQUOT → DiskFull, everything else → IoError).
+    /// </summary>
+    private static StorageWriteException ClassifyWriteFailure(IOException ioex)
+    {
+        // POSIX ENOSPC = 28 (0x1C), EDQUOT = 49 (0x31). On .NET these surface as
+        // HResult values 0x80070070 (ENOSPC) and 0x80070027 (EDQUOT), matching the
+        // Win32 ERROR_DISK_FULL / ERROR_DISK_FULL-with-quota codes.
+        var hr = (uint)(ioex.HResult & 0xFFFF);
+        var isDiskFull =
+            hr == 0x70 // ERROR_DISK_FULL (ENOSPC)
+            || hr == 0x27 // ERROR_DISK_FULL_corrupt/quota (EDQUOT in some paths)
+            || (ioex.Message ?? string.Empty).Contains(
+                "No space left on device",
+                StringComparison.OrdinalIgnoreCase
+            )
+            || (ioex.Message ?? string.Empty).Contains(
+                "Disk full",
+                StringComparison.OrdinalIgnoreCase
+            );
+
+        return new StorageWriteException(
+            isDiskFull ? StorageWriteErrorCodes.DiskFull : StorageWriteErrorCodes.IoError,
+            isDiskFull
+                ? "Write failed: storage filesystem is out of space."
+                : $"Write failed: {ioex.Message}",
+            ioex
+        );
     }
 
     private void InitializeDatabase()
@@ -886,6 +969,10 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         CancellationToken cancellationToken
     )
     {
+        // Pre-write disk-space guard. content.Length is -1 for chunked streams;
+        // we still check the static threshold in that case via anticipatedBytes=0.
+        EnsureSpaceAvailable(content.CanSeek ? content.Length : 0);
+
         var dir = Path.GetDirectoryName(finalPath) ?? ".";
         var fileName = Path.GetFileName(finalPath);
         var tmpPath = Path.Combine(dir, $".{fileName}.{Guid.NewGuid():N}.tmp");
@@ -942,6 +1029,21 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             }
             File.Move(tmpPath, finalPath, overwrite: true);
             FsyncDirectory(dir);
+        }
+        catch (IOException ioex)
+        {
+            if (File.Exists(tmpPath))
+            {
+                try
+                {
+                    File.Delete(tmpPath);
+                }
+                catch
+                {
+                    // Best-effort cleanup; the original failure is the actionable one.
+                }
+            }
+            throw ClassifyWriteFailure(ioex);
         }
         catch
         {
@@ -1437,7 +1539,15 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                     UploadId = reader.GetString(0),
                     BucketName = reader.GetString(1),
                     ObjectKey = reader.GetString(2),
-                    Initiated = DateTime.Parse(reader.GetString(3)),
+                    // RoundtripKind preserves the Utc kind of the "O"-formatted
+                    // created_at value; bare DateTime.Parse can return a Local-kind
+                    // DateTime whose comparison against DateTime.UtcNow is off by the
+                    // timezone offset, breaking time-based filtering (reaper, lifecycle).
+                    Initiated = DateTime.Parse(
+                        reader.GetString(3),
+                        null,
+                        DateTimeStyles.RoundtripKind
+                    ),
                 }
             );
         return uploads;
@@ -1556,44 +1666,65 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         if (partNumber < 1 || partNumber > 10000)
             throw new InvalidOperationException("InvalidPart");
 
+        EnsureSpaceAvailable(content.CanSeek ? content.Length : 0);
+
         var partPath = Path.Combine(GetPartsPath(bucketName, uploadId), partNumber.ToString());
         long size = 0;
         // S3 part ETags are the hex-encoded MD5 of the part bytes; clients validate the
         // ETag they receive here against the one they submit on CompleteMultipartUpload.
-        using (var md5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5))
-        using (
-            var fileStream = new FileStream(
-                partPath,
-                FileMode.Create,
-                FileAccess.Write,
-                FileShare.None,
-                4096,
-                useAsync: true
-            )
-        )
+        try
         {
-            var buffer = new byte[_multipartBufferSize];
-            int read;
-            while (
-                (read = await content.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0
+            using (var md5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5))
+            using (
+                var fileStream = new FileStream(
+                    partPath,
+                    FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.None,
+                    4096,
+                    useAsync: true
+                )
             )
             {
-                await fileStream.WriteAsync(buffer, 0, read, cancellationToken);
-                md5.AppendData(buffer, 0, read);
-                size += read;
+                var buffer = new byte[_multipartBufferSize];
+                int read;
+                while (
+                    (read = await content.ReadAsync(buffer, 0, buffer.Length, cancellationToken))
+                    > 0
+                )
+                {
+                    await fileStream.WriteAsync(buffer, 0, read, cancellationToken);
+                    md5.AppendData(buffer, 0, read);
+                    size += read;
+                }
+                fileStream.Flush(flushToDisk: true);
+                var etag = $"\"{Convert.ToHexString(md5.GetHashAndReset()).ToLowerInvariant()}\"";
+                using var connection = await OpenConnectionAsync(cancellationToken);
+                using var command = connection.CreateCommand();
+                command.CommandText =
+                    "INSERT OR REPLACE INTO parts (upload_id, part_number, etag, size) VALUES ($id, $num, $etag, $size)";
+                command.Parameters.AddWithValue("$id", uploadId);
+                command.Parameters.AddWithValue("$num", partNumber);
+                command.Parameters.AddWithValue("$etag", etag);
+                command.Parameters.AddWithValue("$size", size);
+                await command.ExecuteNonQueryAsync(cancellationToken);
+                return etag;
             }
-            fileStream.Flush(flushToDisk: true);
-            var etag = $"\"{Convert.ToHexString(md5.GetHashAndReset()).ToLowerInvariant()}\"";
-            using var connection = await OpenConnectionAsync(cancellationToken);
-            using var command = connection.CreateCommand();
-            command.CommandText =
-                "INSERT OR REPLACE INTO parts (upload_id, part_number, etag, size) VALUES ($id, $num, $etag, $size)";
-            command.Parameters.AddWithValue("$id", uploadId);
-            command.Parameters.AddWithValue("$num", partNumber);
-            command.Parameters.AddWithValue("$etag", etag);
-            command.Parameters.AddWithValue("$size", size);
-            await command.ExecuteNonQueryAsync(cancellationToken);
-            return etag;
+        }
+        catch (IOException ioex)
+        {
+            if (File.Exists(partPath))
+            {
+                try
+                {
+                    File.Delete(partPath);
+                }
+                catch
+                {
+                    // Best-effort cleanup; the original failure is the actionable one.
+                }
+            }
+            throw ClassifyWriteFailure(ioex);
         }
     }
 
@@ -1685,6 +1816,11 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                     throw new InvalidOperationException("EntityTooSmall");
             }
 
+            // Pre-write disk-space guard: the assembled object's size is the sum
+            // of validated part sizes. Catches ENOSPC before assembly starts.
+            var totalPartBytes = partsList.Sum(p => storedParts[p.PartNumber].Size);
+            EnsureSpaceAvailable(totalPartBytes);
+
             var tmpPath = finalPath + $".{Guid.NewGuid():N}.tmp";
             using var md5Concat = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
             try
@@ -1751,6 +1887,21 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                 }
                 File.Move(tmpPath, finalPath, overwrite: true);
                 FsyncDirectory(finalDir);
+            }
+            catch (IOException ioex)
+            {
+                if (File.Exists(tmpPath))
+                {
+                    try
+                    {
+                        File.Delete(tmpPath);
+                    }
+                    catch
+                    {
+                        // Best-effort cleanup; the original failure is the actionable one.
+                    }
+                }
+                throw ClassifyWriteFailure(ioex);
             }
             catch
             {

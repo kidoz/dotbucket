@@ -34,6 +34,23 @@ public class StorageOptions
     public int MultipartBufferSizeBytes { get; set; } = 81920;
 
     /// <summary>
+    /// If set, object/part writes are refused up-front when the storage filesystem
+    /// has fewer than this many bytes free. Disabled when null (default). When both
+    /// this and <see cref="MinFreeSpacePercent"/> are set, the stricter threshold wins.
+    /// </summary>
+    public long? MinFreeSpaceBytes { get; set; }
+
+    /// <summary>
+    /// Pre-write refusal and /health degradation threshold expressed as a
+    /// percentage of total filesystem capacity. When set (e.g. 5.0), writes are
+    /// refused below 5% free and /health returns 503 below 5% free. Default null
+    /// (feature disabled) — opt in via appsettings.json or env var. Set to 0
+    /// to explicitly disable. When both this and <see cref="MinFreeSpaceBytes"/>
+    /// are set, the stricter threshold wins.
+    /// </summary>
+    public double? MinFreeSpacePercent { get; set; }
+
+    /// <summary>
     /// Buckets to create automatically at startup (idempotent provisioning).
     /// </summary>
     public List<BucketSeed> Buckets { get; set; } = new();

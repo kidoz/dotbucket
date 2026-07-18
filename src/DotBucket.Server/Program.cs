@@ -361,26 +361,81 @@ if (clusterConfig?.Enabled == true)
     app.MapInternalEndpoints();
 }
 
-// Health check endpoint with actual readiness probe (bypasses Auth)
+// Health check endpoint with actual readiness probe (bypasses Auth).
+// Probes two downstream signals: SQLite liveness (via ListBucketsAsync) and
+// free disk space on the storage filesystem (returns 503 LowDiskSpace when
+// below the configured threshold so load balancers stop sending writes).
 app.MapGet(
     "/health",
-    async (IStorageEngine storage, CancellationToken ct) =>
+    async (IStorageEngine storage, IOptions<StorageOptions> storageOptions, CancellationToken ct) =>
     {
         try
         {
             await storage.ListBucketsAsync(ct);
+
+            // Free-disk-space probe. Best-effort: if DriveInfo can't resolve the
+            // root (e.g. a network mount), the probe is skipped and only the DB
+            // liveness signal gates healthiness.
+            var diskReason = CheckFreeDiskSpace(storage.GetStorageRoot(), storageOptions.Value);
+            if (diskReason is not null)
+            {
+                return Results.Json(
+                    new AdminHealthResponse("Unhealthy", diskReason),
+                    StorageObjectJsonContext.Default.AdminHealthResponse,
+                    statusCode: 503
+                );
+            }
+
             return Results.Ok(new AdminHealthResponse("Healthy"));
         }
         catch
         {
             return Results.Json(
-                new AdminHealthResponse("Unhealthy"),
+                new AdminHealthResponse("Unhealthy", "Storage probe failed."),
                 StorageObjectJsonContext.Default.AdminHealthResponse,
                 statusCode: 503
             );
         }
     }
 );
+
+static string? CheckFreeDiskSpace(string storageRoot, StorageOptions options)
+{
+    var percent = options.MinFreeSpacePercent;
+    var bytes = options.MinFreeSpaceBytes;
+    if (percent is null or 0.0 && bytes is null)
+        return null;
+
+    DriveInfo drive;
+    try
+    {
+        drive = new DriveInfo(storageRoot);
+    }
+    catch (ArgumentException)
+    {
+        // Path doesn't map to a drive (e.g. UNC, network mount); skip the probe.
+        return null;
+    }
+
+    var available = drive.AvailableFreeSpace;
+    var total = drive.TotalSize;
+
+    if (bytes is { } bytesThreshold && available < bytesThreshold)
+    {
+        return $"LowDiskSpace: {available} bytes free (threshold {bytesThreshold}).";
+    }
+
+    if (percent is { } pct and > 0.0 && total > 0)
+    {
+        var pctFree = (double)available / total * 100.0;
+        if (pctFree < pct)
+        {
+            return $"LowDiskSpace: {pctFree:F1}% free (threshold {pct}%).";
+        }
+    }
+
+    return null;
+}
 
 // Fallback all other non-API routes to serve the React Frontend SPA
 app.MapFallbackToFile("index.html");

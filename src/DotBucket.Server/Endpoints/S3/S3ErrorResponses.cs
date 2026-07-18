@@ -64,6 +64,26 @@ public static class S3ErrorResponses
             "The specified multipart upload does not exist."
         );
 
+    /// <summary>
+    /// HTTP 507 — the storage filesystem is out of space or below the configured
+    /// free-space threshold. S3 clients treat 5xx as retryable; the precise 507
+    /// surfaces the cause to operators via metrics/logs.
+    /// </summary>
+    public static Task InsufficientStorageAsync(HttpContext context, string? message = null) =>
+        WriteErrorAsync(context, 507, "InsufficientStorage", message ?? "Insufficient storage.");
+
+    /// <summary>
+    /// HTTP 500 catch-all for storage write failures that are not ENOSPC (e.g.
+    /// permission denied, I/O error, file handle exhaustion).
+    /// </summary>
+    public static Task InternalErrorAsync(HttpContext context, string? message = null) =>
+        WriteErrorAsync(
+            context,
+            500,
+            "InternalError",
+            message ?? "We encountered an internal error. Please try again."
+        );
+
     public static Task AccessDeniedAsync(HttpContext context) =>
         WriteErrorAsync(context, 403, "AccessDenied", "Access Denied");
 

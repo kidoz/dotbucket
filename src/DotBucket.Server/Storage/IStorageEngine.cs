@@ -184,4 +184,11 @@ public interface IStorageEngine
         string uploadId,
         CancellationToken cancellationToken = default
     );
+
+    /// <summary>
+    /// Absolute path to the directory where object bytes live. Used by the
+    /// /health readiness probe to check available disk space. Must return a
+    /// path that exists at the time of the call.
+    /// </summary>
+    string GetStorageRoot();
 }

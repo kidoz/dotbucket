@@ -454,7 +454,7 @@ public class SigV4Authenticator(
 
         foreach (var header in signedHeaders)
         {
-            var value = request.Headers[header].ToString().Trim();
+            var value = CanonicalizeHeaderValue(request.Headers[header].ToString());
             canonicalHeaders.Append($"{header}:{value}\n");
         }
 
@@ -476,11 +476,52 @@ public class SigV4Authenticator(
 
         foreach (var header in signedHeaders)
         {
-            var value = request.Headers[header].ToString().Trim();
+            var value = CanonicalizeHeaderValue(request.Headers[header].ToString());
             canonicalHeaders.Append($"{header}:{value}\n");
         }
 
         return $"{method}\n{uri}\n{canonicalQueryString}\n{canonicalHeaders}\n{signedHeadersStr}\n{payloadHash}";
+    }
+
+    /// <summary>
+    /// Normalize a header value for the canonical request per the AWS SigV4 spec:
+    /// trim leading/trailing whitespace and collapse sequential internal spaces
+    /// (including tabs) to a single space. Do NOT reorder or otherwise alter
+    /// comma-separated multi-value semantics.
+    /// </summary>
+    private static string CanonicalizeHeaderValue(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return string.Empty;
+
+        var trimmed = value.AsSpan().Trim();
+        if (trimmed.Length == value.Length)
+        {
+            // Fast path: nothing to trim; only collapse if internal runs exist.
+            if (value.IndexOf(' ') < 0 && value.IndexOf('\t') < 0)
+                return value;
+        }
+
+        var sb = new StringBuilder(trimmed.Length);
+        var inWhitespace = false;
+        foreach (var c in trimmed)
+        {
+            if (c == ' ' || c == '\t')
+            {
+                inWhitespace = true;
+                continue;
+            }
+
+            if (inWhitespace)
+            {
+                sb.Append(' ');
+                inWhitespace = false;
+            }
+
+            sb.Append(c);
+        }
+
+        return sb.ToString();
     }
 
     private static string CanonicalizeUri(string path)

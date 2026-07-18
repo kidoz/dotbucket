@@ -1,6 +1,8 @@
 // Licensed under the MIT License.
 // See LICENSE file in the project root for full license information.
 
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using DotBucket.Server.Configuration;
 using DotBucket.Server.Models;
@@ -336,11 +338,26 @@ public class ClusterTokenFilter(IOptions<ClusterOptions> options) : IEndpointFil
         }
 
         var token = context.HttpContext.Request.Headers["X-DotBucket-Cluster-Token"].ToString();
-        if (string.IsNullOrEmpty(token) || token != _options.ClusterToken)
+        if (!FixedTimeEquals(token, _options.ClusterToken))
         {
             return Results.Unauthorized();
         }
 
         return await next(context);
+    }
+
+    /// <summary>
+    /// Constant-time string comparison for secrets. Returns false for null/empty
+    /// inputs without short-circuiting on length, to avoid leaking the configured
+    /// token length via timing.
+    /// </summary>
+    private static bool FixedTimeEquals(string? a, string? b)
+    {
+        if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b))
+            return false;
+
+        var aBytes = Encoding.UTF8.GetBytes(a);
+        var bBytes = Encoding.UTF8.GetBytes(b);
+        return CryptographicOperations.FixedTimeEquals(aBytes, bBytes);
     }
 }

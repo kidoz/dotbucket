@@ -22,24 +22,20 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Configure Auth
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.SectionName));
-var authOptions =
-    builder.Configuration.GetSection(AuthOptions.SectionName).Get<AuthOptions>()
+var authOptions = builder.Configuration.GetSection(AuthOptions.SectionName).Get<AuthOptions>()
     ?? new AuthOptions();
 
 // Configure CORS for the frontend
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy(
-        "AllowFrontend",
-        policy =>
-        {
-            var origins =
-                authOptions.AllowedOrigins.Count > 0
-                    ? authOptions.AllowedOrigins.ToArray()
-                    : new[] { "http://localhost:5173" };
-            policy.WithOrigins(origins).AllowAnyHeader().AllowAnyMethod();
-        }
-    );
+    options.AddPolicy("AllowFrontend", policy =>
+    {
+        var origins =
+            authOptions.AllowedOrigins.Count > 0
+                ? authOptions.AllowedOrigins.ToArray()
+                : new[] { "http://localhost:5173" };
+        policy.WithOrigins(origins).AllowAnyHeader().AllowAnyMethod();
+    });
 });
 
 // Register Notification Services
@@ -59,8 +55,9 @@ builder.Services.AddHostedService<MultipartUploadReaperService>();
 builder.Services.Configure<StorageOptions>(
     builder.Configuration.GetSection(StorageOptions.SectionName)
 );
-var storageOptions =
-    builder.Configuration.GetSection(StorageOptions.SectionName).Get<StorageOptions>()
+var storageOptions = builder
+    .Configuration.GetSection(StorageOptions.SectionName)
+    .Get<StorageOptions>()
     ?? new StorageOptions();
 
 // Configure S3 addressing/region options
@@ -142,16 +139,22 @@ builder.Services.AddOpenApi();
 // Rate limiting: two named token-bucket policies. The "s3" policy partitions
 // per authenticated access key (HttpContext.Items["AccessKey"], set by
 // SigV4Authenticator) with a fallback to client IP; the "admin" policy
-// partitions per client IP. /health and /_internal are exempt because the
-// limiter is wired inside the S3 UseWhen branch and admin groups attach the
-// policy explicitly (see MapAdminEndpoints / MapIamEndpoints).
+// partitions per client IP. Enforcement requires the rate-limiting middleware
+// in the request's pipeline, so UseRateLimiter is activated in BOTH the S3
+// UseWhen branch and a dedicated /admin UseWhen branch below — endpoint
+// metadata (RequireRateLimiting) alone enforces nothing. /health and
+// /_internal stay exempt because neither branch covers them. ListBuckets
+// (GET /) is served by short-circuiting middleware, not a routed endpoint,
+// so it is throttled separately via a shared limiter (see the ListBuckets
+// middleware below).
 //
 // The policies are always registered so endpoint groups can statically declare
 // RequireRateLimiting("...") without throwing when RateLimit:Enabled is false.
 // Enforcement is gated on app.UseRateLimiter() being added to the pipeline,
 // which only happens when Enabled is true.
-var rateLimitOptions =
-    builder.Configuration.GetSection(RateLimitOptions.SectionName).Get<RateLimitOptions>()
+var rateLimitOptions = builder
+    .Configuration.GetSection(RateLimitOptions.SectionName)
+    .Get<RateLimitOptions>()
     ?? new RateLimitOptions();
 
 builder.Services.AddRateLimiter(limiterOptions =>
@@ -168,59 +171,37 @@ builder.Services.AddRateLimiter(limiterOptions =>
         return ValueTask.CompletedTask;
     };
 
-    // S3 surface: per access key, falls back to client IP.
-    limiterOptions.AddPolicy(
-        "s3",
-        httpContext =>
-        {
-            var accessKey = httpContext.Items.TryGetValue("AccessKey", out var ak)
-                ? ak as string
-                : null;
-            var partition =
-                accessKey ?? httpContext.Connection.RemoteIpAddress?.ToString() ?? "anon";
-            return RateLimitPartition.GetTokenBucketLimiter(
-                partition,
-                _ => new TokenBucketRateLimiterOptions
-                {
-                    TokenLimit = rateLimitOptions.S3Burst,
-                    TokensPerPeriod = rateLimitOptions.S3PermitPerSecond,
-                    ReplenishmentPeriod = TimeSpan.FromSeconds(1),
-                    QueueLimit = rateLimitOptions.S3Burst,
-                    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
-                    AutoReplenishment = true,
-                }
-            );
-        }
+    // S3 surface: per access key, falls back to client IP. The partition
+    // helper is shared with the ListBuckets middleware's limiter so both
+    // surfaces key off the same principal.
+    limiterOptions.AddPolicy("s3", httpContext =>
+        S3RateLimitPartition(httpContext, rateLimitOptions)
     );
 
     // Admin/IAM surface: per client IP.
-    limiterOptions.AddPolicy(
-        "admin",
-        httpContext =>
-        {
-            var partition = httpContext.Connection.RemoteIpAddress?.ToString() ?? "anon";
-            return RateLimitPartition.GetTokenBucketLimiter(
-                partition,
-                _ => new TokenBucketRateLimiterOptions
-                {
-                    TokenLimit = rateLimitOptions.AdminBurst,
-                    TokensPerPeriod = rateLimitOptions.AdminPermitPerSecond,
-                    ReplenishmentPeriod = TimeSpan.FromSeconds(1),
-                    QueueLimit = rateLimitOptions.AdminBurst,
-                    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
-                    AutoReplenishment = true,
-                }
-            );
-        }
-    );
+    limiterOptions.AddPolicy("admin", httpContext =>
+    {
+        var partition = httpContext.Connection.RemoteIpAddress?.ToString() ?? "anon";
+        return RateLimitPartition.GetTokenBucketLimiter(
+            partition,
+            _ => new TokenBucketRateLimiterOptions
+            {
+                TokenLimit = rateLimitOptions.AdminBurst,
+                TokensPerPeriod = rateLimitOptions.AdminPermitPerSecond,
+                ReplenishmentPeriod = TimeSpan.FromSeconds(1),
+                QueueLimit = rateLimitOptions.AdminBurst,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                AutoReplenishment = true,
+            }
+        );
+    });
 });
 
 // OpenTelemetry traces + metrics, exported via OTLP. Enabled only when an endpoint is
 // configured (Observability:OtlpEndpoint or the standard OTEL_EXPORTER_OTLP_ENDPOINT).
 // Uses the runtime's built-in activity sources and meters instead of instrumentation
 // packages to stay Native AOT / full-trim compatible.
-var otlpEndpoint =
-    builder.Configuration["Observability:OtlpEndpoint"]
+var otlpEndpoint = builder.Configuration["Observability:OtlpEndpoint"]
     ?? builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
 if (!string.IsNullOrEmpty(otlpEndpoint))
 {
@@ -370,10 +351,10 @@ app.UseWhen(
     {
         appBuilder.UseMiddleware<S3AuthMiddleware>();
         // Rate limiting runs AFTER auth so the "s3" policy can partition on
-        // the authenticated access key (HttpContext.Items["AccessKey"]). Activating
-        // UseRateLimiter here (rather than globally) auto-exempts /admin, /health,
-        // /_internal, /assets because those paths are excluded from this UseWhen
-        // branch. The "s3" policy is attached to MapS3Endpoints below.
+        // the authenticated access key (HttpContext.Items["AccessKey"]). This
+        // branch excludes /admin, /health, /_internal, /assets; /admin gets its
+        // own UseRateLimiter branch below, the rest stay exempt. The "s3"
+        // policy is attached to the endpoint group in MapS3Endpoints.
         if (rateLimitOptions.Enabled)
         {
             appBuilder.UseRateLimiter();
@@ -385,8 +366,33 @@ app.UseWhen(
     }
 );
 
+// Admin/IAM rate limiting. The S3 branch above excludes /admin, and endpoint
+// metadata (RequireRateLimiting("admin") on the admin/IAM groups) enforces
+// nothing unless the rate-limiting middleware runs for the request — so
+// activate it here for admin paths.
+if (rateLimitOptions.Enabled)
+{
+    app.UseWhen(
+        ctx => ctx.Request.Path.StartsWithSegments("/admin"),
+        appBuilder => appBuilder.UseRateLimiter()
+    );
+}
+
 // S3 ListBuckets Middleware (Intersects GET / for authenticated S3 clients only)
 // Runs AFTER auth middleware so only authenticated requests can list buckets.
+//
+// This middleware short-circuits before endpoint routing, so the endpoint-based
+// "s3" rate-limit policy never sees it. It is throttled through this dedicated
+// limiter instead, built from the same per-access-key partitioner and token
+// bucket parameters. Note this is a separate bucket from the "s3" policy: a
+// client gets an independent S3-sized allowance for ListBuckets specifically,
+// which is acceptable — the goal is that no authenticated surface is unbounded.
+var listBucketsLimiter = rateLimitOptions.Enabled
+    ? PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+        S3RateLimitPartition(httpContext, rateLimitOptions)
+    )
+    : null;
+
 app.Use(
     async (context, next) =>
     {
@@ -399,6 +405,28 @@ app.Use(
             // Only serve bucket list if this is an authenticated S3 request
             if (isS3Request && context.Items.ContainsKey("AccessKey"))
             {
+                if (listBucketsLimiter is not null)
+                {
+                    // AcquireAsync queues like the endpoint middleware does;
+                    // when the queue is full it completes immediately unacquired.
+                    using var lease = await listBucketsLimiter.AcquireAsync(
+                        context,
+                        1,
+                        context.RequestAborted
+                    );
+                    if (!lease.IsAcquired)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                        if (lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+                        {
+                            context.Response.Headers.RetryAfter = retryAfter.TotalSeconds.ToString(
+                                CultureInfo.InvariantCulture
+                            );
+                        }
+                        return;
+                    }
+                }
+
                 var storageEngine = context.RequestServices.GetRequiredService<IStorageEngine>();
                 var buckets = await storageEngine.ListBucketsAsync(context.RequestAborted);
                 var s3Ns = (XNamespace)"http://s3.amazonaws.com/doc/2006-03-01/";
@@ -493,6 +521,30 @@ app.MapGet(
         }
     }
 );
+
+// Shared by the "s3" rate-limit policy and the ListBuckets middleware limiter:
+// partition per authenticated access key, falling back to client IP. Mirrored
+// by RateLimitingTests — keep in sync.
+static RateLimitPartition<string> S3RateLimitPartition(
+    HttpContext httpContext,
+    RateLimitOptions options
+)
+{
+    var accessKey = httpContext.Items.TryGetValue("AccessKey", out var ak) ? ak as string : null;
+    var partition = accessKey ?? httpContext.Connection.RemoteIpAddress?.ToString() ?? "anon";
+    return RateLimitPartition.GetTokenBucketLimiter(
+        partition,
+        _ => new TokenBucketRateLimiterOptions
+        {
+            TokenLimit = options.S3Burst,
+            TokensPerPeriod = options.S3PermitPerSecond,
+            ReplenishmentPeriod = TimeSpan.FromSeconds(1),
+            QueueLimit = options.S3Burst,
+            QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+            AutoReplenishment = true,
+        }
+    );
+}
 
 static string? CheckFreeDiskSpace(string storageRoot, StorageOptions options)
 {

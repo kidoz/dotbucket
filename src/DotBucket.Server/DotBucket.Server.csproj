@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net11.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
@@ -13,27 +13,28 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
-    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.17.0" />
-    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.17.0" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="11.0.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="11.0.0" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.21.0" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.21.0" />
   </ItemGroup>
 
   <!--
     Transitive overrides (see .agents/contexts/security/DEPENDENCY_POLICY.md).
 
-      * SQLitePCLRaw.lib.e_sqlite3 (via Microsoft.Data.Sqlite): GHSA-2m69-gcr7-jv3q (high).
-        Pinned to the 3.x line; this is the SQLite native binder used by Microsoft.Data.Sqlite.
       * Microsoft.OpenApi (via Microsoft.AspNetCore.OpenApi): GHSA-v5pm-xwqc-g5wc (high,
-        DoS via circular schema refs in OpenAPI document parsing). Patched in 2.7.5+ on the
-        2.x line. The 3.x line is NOT compatible with Microsoft.AspNetCore.OpenApi 10.0.x
-        (its source generator emits assignments to the read-only IOpenApiMediaType.Example).
-        In DotBucket OpenAPI is exposed only in Development (Program.cs MapOpenApi gate),
-        so production is not on the vulnerable code path; the bump still removes the
-        surface and keeps NuGet audit clean.
+        DoS via circular schema refs in OpenAPI document parsing). Patched in 3.5.4+.
+        Microsoft.AspNetCore.OpenApi 11.0.x requires Microsoft.OpenApi [3.11.0, 4.0.0),
+        so the 3.x line is now the supported combination; pinned to 3.11.1 to keep the
+        audit-clean version deterministic. In DotBucket OpenAPI is exposed only in
+        Development (Program.cs MapOpenApi gate), so production is not on the vulnerable
+        code path; the pin still removes the surface and keeps NuGet audit clean.
+
+    SQLitePCLRaw.lib.e_sqlite3 is no longer pinned: Microsoft.Data.Sqlite 11.0.0 resolves
+    SQLitePCLRaw.bundle_e_sqlite3 3.0.5, which uses the patched `SQLite` 3.53.4 native
+    package instead of the vulnerable lib.e_sqlite3 <= 2.1.11 (GHSA-2m69-gcr7-jv3q).
   -->
   <ItemGroup>
-    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.53.3" />
-    <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />
+    <PackageReference Include="Microsoft.OpenApi" Version="3.11.1" />
   </ItemGroup>
 </Project>

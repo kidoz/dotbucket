@@ -4,15 +4,15 @@
 > This project is in an early, experimental stage. It is under active development, and features, APIs, and the storage format are subject to breaking changes without notice. It is **not** recommended for production use.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![.NET 10](https://img.shields.io/badge/.NET-10.0-purple.svg)](https://dotnet.microsoft.com/)
+[![.NET 11](https://img.shields.io/badge/.NET-11.0-purple.svg)](https://dotnet.microsoft.com/)
 
-**DotBucket** is a lightweight, high-performance, S3-compatible object storage server built with .NET 10. A true restriction-free alternative to MinIO, released under the **MIT License** -- safe for enterprise, commercial, and closed-source integration without copyleft concerns.
+**DotBucket** is a lightweight, high-performance, S3-compatible object storage server built with .NET 11. A true restriction-free alternative to MinIO, released under the **MIT License** -- safe for enterprise, commercial, and closed-source integration without copyleft concerns.
 
 ## Features
 
 - **S3 API Compatibility** -- Core S3 operations (PUT, GET, DELETE, LIST) with path-style **and** virtual-hosted-style access. Works with AWS SDK, Boto3, MinIO Client, and other standard S3 tools.
 - **MIT Licensed** -- No AGPLv3 restrictions. No commercial license required. Ever.
-- **High Performance** -- .NET 10, C# 14, Native AOT compilation. Zero external NuGet dependencies.
+- **High Performance** -- .NET 11, C# 15, Native AOT compilation. Zero external NuGet dependencies.
 - **Built-in Admin Dashboard** -- React-based web UI to manage buckets and objects.
 - **AWS SigV4 Authentication** -- Full AWS Signature Version 4 (AWS4-HMAC-SHA256) support, with static access keys and configurable session-token handling.
 - **Flexible Addressing & Regions** -- Path-style and virtual-hosted-style URLs; configurable advertised region and optional strict signing-region enforcement.
@@ -25,7 +25,7 @@
 
 | Layer | Technology |
 |---|---|
-| Backend | .NET 10 / C# 14 (Minimal APIs, Native AOT) |
+| Backend | .NET 11 / C# 15 (Minimal APIs, Native AOT) |
 | Frontend | React 19, TypeScript, Tailwind CSS, Vite, Shadcn UI |
 | Protocol | REST over HTTP (S3-compatible XML responses) |
 | Storage | Local filesystem (extensible via `IStorageEngine`) |
@@ -34,7 +34,7 @@
 
 ### Prerequisites
 
-- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
+- [.NET 11 SDK](https://dotnet.microsoft.com/download/dotnet/11.0)
 - [Node.js](https://nodejs.org/) v20+ (for frontend development)
 - [just](https://github.com/casey/just) (optional, but recommended for task automation)
 

@@ -11,7 +11,7 @@ COPY src/DotBucket.UI/ ./
 RUN npm run build
 
 # Stage 2: Build the .NET Backend (Native AOT)
-FROM mcr.microsoft.com/dotnet/sdk:10.0-alpine AS backend-build
+FROM mcr.microsoft.com/dotnet/sdk:11.0-alpine AS backend-build
 WORKDIR /app/backend
 
 # Install build dependencies for Native AOT on Alpine
@@ -35,7 +35,7 @@ RUN dotnet publish -c Release -o /app/publish
 
 # Stage 3: Create the final runtime image
 # For Native AOT, we only need runtime-deps as the binary is self-contained
-FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine AS final
+FROM mcr.microsoft.com/dotnet/runtime-deps:11.0-alpine AS final
 WORKDIR /app
 
 # Install curl for healthchecks

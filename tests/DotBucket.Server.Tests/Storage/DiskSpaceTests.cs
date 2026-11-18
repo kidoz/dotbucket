@@ -209,11 +209,10 @@ public class DiskSpaceTests : IDisposable
 
     private static string InvokeClassify(IOException ioex)
     {
-        var method =
-            typeof(LocalFileSystemStorageEngine).GetMethod(
-                "ClassifyWriteFailure",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static
-            ) ?? throw new InvalidOperationException("ClassifyWriteFailure not found.");
+        var method = typeof(LocalFileSystemStorageEngine).GetMethod(
+            "ClassifyWriteFailure",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static
+        ) ?? throw new InvalidOperationException("ClassifyWriteFailure not found.");
         var result = (StorageWriteException)method.Invoke(null, new object[] { ioex })!;
         return result.Code;
     }

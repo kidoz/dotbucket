@@ -91,11 +91,10 @@ public class MultipartUploadReaperServiceTests : IDisposable
         CancellationToken ct
     )
     {
-        var method =
-            typeof(MultipartUploadReaperService).GetMethod(
-                "ScanPassAsync",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance
-            ) ?? throw new InvalidOperationException("ScanPassAsync not found via reflection.");
+        var method = typeof(MultipartUploadReaperService).GetMethod(
+            "ScanPassAsync",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance
+        ) ?? throw new InvalidOperationException("ScanPassAsync not found via reflection.");
         try
         {
             await ((Task)method.Invoke(reaper, new object[] { ct })!);
@@ -257,9 +256,7 @@ public class MultipartUploadReaperServiceTests : IDisposable
         await InvokeScanPassAsync(reaper, Ct);
 
         // Upload is gone, object is intact.
-        (await CountUploadsAsync())
-            .Should()
-            .Be(0);
+        (await CountUploadsAsync()).Should().Be(0);
         var objects = await _storage.ListObjectsAsync("b1", null, false, Ct);
         objects
             .Select(o => o.ObjectKey)

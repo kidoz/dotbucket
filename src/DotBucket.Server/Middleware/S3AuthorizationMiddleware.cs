@@ -156,11 +156,10 @@ public class S3AuthorizationMiddleware(
 
             var doc = XDocument.Parse(xml);
             var ns = doc.Root?.Name.Namespace ?? XNamespace.None;
-            keys =
-                doc.Root?.Elements(ns + "Object")
-                    .Select(o => o.Element(ns + "Key")?.Value ?? string.Empty)
-                    .Where(k => !string.IsNullOrEmpty(k))
-                    .ToList()
+            keys = doc.Root?.Elements(ns + "Object")
+                .Select(o => o.Element(ns + "Key")?.Value ?? string.Empty)
+                .Where(k => !string.IsNullOrEmpty(k))
+                .ToList()
                 ?? new List<string>();
         }
         catch

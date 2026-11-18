@@ -18,14 +18,11 @@ public static class IamEndpoints
 
         // --- Users ---
 
-        group.MapGet(
-            "/users",
-            async (IamStore store, CancellationToken ct) =>
-            {
-                var users = await store.ListUsersAsync(ct);
-                return Results.Ok(users);
-            }
-        );
+        group.MapGet("/users", async (IamStore store, CancellationToken ct) =>
+        {
+            var users = await store.ListUsersAsync(ct);
+            return Results.Ok(users);
+        });
 
         group.MapPost(
             "/users",
@@ -167,14 +164,11 @@ public static class IamEndpoints
 
         // --- Groups ---
 
-        group.MapGet(
-            "/groups",
-            async (IamStore store, CancellationToken ct) =>
-            {
-                var groups = await store.ListGroupsAsync(ct);
-                return Results.Ok(groups);
-            }
-        );
+        group.MapGet("/groups", async (IamStore store, CancellationToken ct) =>
+        {
+            var groups = await store.ListGroupsAsync(ct);
+            return Results.Ok(groups);
+        });
 
         group.MapPost(
             "/groups",
@@ -264,14 +258,11 @@ public static class IamEndpoints
 
         // --- Policies ---
 
-        group.MapGet(
-            "/policies",
-            async (IamStore store, CancellationToken ct) =>
-            {
-                var policies = await store.ListPoliciesAsync(ct);
-                return Results.Ok(policies);
-            }
-        );
+        group.MapGet("/policies", async (IamStore store, CancellationToken ct) =>
+        {
+            var policies = await store.ListPoliciesAsync(ct);
+            return Results.Ok(policies);
+        });
 
         group.MapPost(
             "/policies",

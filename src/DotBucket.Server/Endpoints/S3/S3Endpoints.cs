@@ -254,31 +254,31 @@ public static class S3Endpoints
                     var xml = await reader.ReadToEndAsync(context.RequestAborted);
                     var doc = XDocument.Parse(xml);
 
-                    var notifications =
-                        doc.Root?.Elements(doc.Root.Name.Namespace + "QueueConfiguration")
-                            .Select(q =>
-                            {
-                                var filter = q.Element(q.Name.Namespace + "Filter")
-                                    ?.Element(q.Name.Namespace + "S3Key");
-                                var rule = filter
-                                    ?.Elements(q.Name.Namespace + "FilterRule")
-                                    .FirstOrDefault(r =>
-                                        r.Element(r.Name.Namespace + "Name")?.Value == "prefix"
-                                    );
+                    var notifications = doc.Root?.Elements(
+                            doc.Root.Name.Namespace + "QueueConfiguration"
+                        )
+                        .Select(q =>
+                        {
+                            var filter = q.Element(q.Name.Namespace + "Filter")
+                                ?.Element(q.Name.Namespace + "S3Key");
+                            var rule = filter
+                                ?.Elements(q.Name.Namespace + "FilterRule")
+                                .FirstOrDefault(r =>
+                                    r.Element(r.Name.Namespace + "Name")?.Value == "prefix"
+                                );
 
-                                return new NotificationConfiguration
-                                {
-                                    Id =
-                                        q.Element(q.Name.Namespace + "Id")?.Value
-                                        ?? Guid.NewGuid().ToString(),
-                                    WebhookUrl = q.Element(q.Name.Namespace + "Queue")?.Value ?? "",
-                                    Events = q.Elements(q.Name.Namespace + "Event")
-                                        .Select(e => e.Value)
-                                        .ToList(),
-                                    FilterPrefix = rule?.Element(q.Name.Namespace + "Value")?.Value,
-                                };
-                            })
-                            .ToList()
+                            return new NotificationConfiguration
+                            {
+                                Id = q.Element(q.Name.Namespace + "Id")?.Value
+                                    ?? Guid.NewGuid().ToString(),
+                                WebhookUrl = q.Element(q.Name.Namespace + "Queue")?.Value ?? "",
+                                Events = q.Elements(q.Name.Namespace + "Event")
+                                    .Select(e => e.Value)
+                                    .ToList(),
+                                FilterPrefix = rule?.Element(q.Name.Namespace + "Value")?.Value,
+                            };
+                        })
+                        .ToList()
                         ?? new List<NotificationConfiguration>();
 
                     await storageEngine.SetNotificationsAsync(
@@ -1001,17 +1001,16 @@ public static class S3Endpoints
                     using var reader = new StreamReader(context.Request.Body);
                     var xml = await reader.ReadToEndAsync(context.RequestAborted);
                     var doc = XDocument.Parse(xml);
-                    var parts =
-                        doc.Root?.Elements(doc.Root.Name.Namespace + "Part")
-                            .Select(p =>
-                                (
-                                    PartNumber: int.Parse(
-                                        p.Element(p.Name.Namespace + "PartNumber")?.Value ?? "0"
-                                    ),
-                                    ETag: p.Element(p.Name.Namespace + "ETag")?.Value ?? ""
-                                )
+                    var parts = doc.Root?.Elements(doc.Root.Name.Namespace + "Part")
+                        .Select(p =>
+                            (
+                                PartNumber: int.Parse(
+                                    p.Element(p.Name.Namespace + "PartNumber")?.Value ?? "0"
+                                ),
+                                ETag: p.Element(p.Name.Namespace + "ETag")?.Value ?? ""
                             )
-                            .ToList()
+                        )
+                        .ToList()
                         ?? new();
 
                     StorageObject obj;
@@ -1098,16 +1097,15 @@ public static class S3Endpoints
                 var ns = doc.Root?.Name.Namespace ?? XNamespace.None;
                 var quiet = doc.Root?.Element(ns + "Quiet")?.Value == "true";
 
-                var objectsToDelete =
-                    doc.Root?.Elements(ns + "Object")
-                        .Select(o =>
-                            (
-                                Key: o.Element(ns + "Key")?.Value ?? "",
-                                VersionId: o.Element(ns + "VersionId")?.Value
-                            )
+                var objectsToDelete = doc.Root?.Elements(ns + "Object")
+                    .Select(o =>
+                        (
+                            Key: o.Element(ns + "Key")?.Value ?? "",
+                            VersionId: o.Element(ns + "VersionId")?.Value
                         )
-                        .Where(o => !string.IsNullOrEmpty(o.Key))
-                        .ToList()
+                    )
+                    .Where(o => !string.IsNullOrEmpty(o.Key))
+                    .ToList()
                     ?? new();
 
                 var results = await storageEngine.DeleteObjectsAsync(

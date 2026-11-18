@@ -613,8 +613,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         CancellationToken cancellationToken = default
     )
     {
-        var bucket =
-            await GetBucketAsync(bucketName, cancellationToken)
+        var bucket = await GetBucketAsync(bucketName, cancellationToken)
             ?? throw new InvalidOperationException("NoSuchBucket");
 
         // S3 semantics: Object Lock can only be enabled at bucket creation. Once enabled it
@@ -658,8 +657,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         await EnsureBucketHasObjectLockAsync(bucketName, cancellationToken);
 
         // The object/version must exist before applying retention.
-        var current =
-            await HeadObjectAsync(bucketName, objectKey, versionId, cancellationToken)
+        var current = await HeadObjectAsync(bucketName, objectKey, versionId, cancellationToken)
             ?? throw new InvalidOperationException("NoSuchKey");
 
         // COMPLIANCE retention is immutable: it cannot be lifted or shortened, and the mode
@@ -698,8 +696,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
     {
         await EnsureBucketHasObjectLockAsync(bucketName, cancellationToken);
 
-        _ =
-            await HeadObjectAsync(bucketName, objectKey, versionId, cancellationToken)
+        _ = await HeadObjectAsync(bucketName, objectKey, versionId, cancellationToken)
             ?? throw new InvalidOperationException("NoSuchKey");
 
         using var connection = await OpenConnectionAsync(cancellationToken);
@@ -725,8 +722,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         CancellationToken cancellationToken
     )
     {
-        var bucket =
-            await GetBucketAsync(bucketName, cancellationToken)
+        var bucket = await GetBucketAsync(bucketName, cancellationToken)
             ?? throw new InvalidOperationException("NoSuchBucket");
         if (!bucket.ObjectLock.Enabled)
             throw new InvalidOperationException("InvalidRequest");
@@ -766,9 +762,9 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         if (string.IsNullOrEmpty(json))
             return new List<NotificationConfiguration>();
         return JsonSerializer.Deserialize(
-                json,
-                StorageObjectJsonContext.Default.ListNotificationConfiguration
-            ) ?? new List<NotificationConfiguration>();
+            json,
+            StorageObjectJsonContext.Default.ListNotificationConfiguration
+        ) ?? new List<NotificationConfiguration>();
     }
 
     public async Task SetLifecycleAsync(
@@ -891,8 +887,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         await writeLock.WaitAsync(cancellationToken);
         try
         {
-            var bucket =
-                await GetBucketAsync(bucketName, cancellationToken)
+            var bucket = await GetBucketAsync(bucketName, cancellationToken)
                 ?? throw new InvalidOperationException($"Bucket '{bucketName}' does not exist.");
 
             var versionId = "null";
@@ -1221,8 +1216,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         CancellationToken cancellationToken = default
     )
     {
-        var bucket =
-            await GetBucketAsync(bucketName, cancellationToken)
+        var bucket = await GetBucketAsync(bucketName, cancellationToken)
             ?? throw new InvalidOperationException($"Bucket '{bucketName}' does not exist.");
         StorageObject? targetObj = null;
 
@@ -1582,11 +1576,10 @@ public class LocalFileSystemStorageEngine : IStorageEngine
     private StorageObject MapReaderToStorageObject(SqliteDataReader reader)
     {
         var metaJson = reader.GetString(reader.GetOrdinal("metadata_json"));
-        var metadata =
-            JsonSerializer.Deserialize(
-                metaJson,
-                StorageObjectJsonContext.Default.DictionaryStringString
-            ) ?? new();
+        var metadata = JsonSerializer.Deserialize(
+            metaJson,
+            StorageObjectJsonContext.Default.DictionaryStringString
+        ) ?? new();
         var retentionMode = reader.IsDBNull(reader.GetOrdinal("retention_mode"))
             ? null
             : reader.GetString(reader.GetOrdinal("retention_mode"));
@@ -1752,14 +1745,12 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             var encryption = uploadReader.IsDBNull(uploadReader.GetOrdinal("encryption"))
                 ? null
                 : uploadReader.GetString(uploadReader.GetOrdinal("encryption"));
-            var metadata =
-                JsonSerializer.Deserialize(
-                    metaJson,
-                    StorageObjectJsonContext.Default.DictionaryStringString
-                ) ?? new();
+            var metadata = JsonSerializer.Deserialize(
+                metaJson,
+                StorageObjectJsonContext.Default.DictionaryStringString
+            ) ?? new();
             await uploadReader.CloseAsync();
-            var bucket =
-                await GetBucketAsync(bucketName, cancellationToken)
+            var bucket = await GetBucketAsync(bucketName, cancellationToken)
                 ?? throw new InvalidOperationException($"Bucket '{bucketName}' missing.");
             var versionId =
                 bucket.Versioning == VersioningStatus.Enabled

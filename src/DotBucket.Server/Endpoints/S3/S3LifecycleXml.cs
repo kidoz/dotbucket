@@ -33,8 +33,7 @@ public static class S3LifecycleXml
             var status = ruleEl.Element(ns + "Status")?.Value;
 
             // Prefix may be at the top level (legacy) or inside Filter/Prefix.
-            var prefix =
-                ruleEl.Element(ns + "Prefix")?.Value
+            var prefix = ruleEl.Element(ns + "Prefix")?.Value
                 ?? ruleEl.Element(ns + "Filter")?.Element(ns + "Prefix")?.Value;
 
             var expiration = ruleEl.Element(ns + "Expiration");

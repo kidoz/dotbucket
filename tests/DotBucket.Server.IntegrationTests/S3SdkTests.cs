@@ -5,18 +5,20 @@ using Amazon.S3;
 using Amazon.S3.Model;
 using AwesomeAssertions;
 using DotBucket.Server.Auth;
+using DotBucket.Server.Configuration;
+using DotBucket.Server.Iam;
+using DotBucket.Server.Storage;
 using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace DotBucket.Server.IntegrationTests;
 
-public class S3SdkTests : IClassFixture<WebApplicationFactory<Program>>
+public class S3SdkTests : IClassFixture<IsolatedServerFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly IsolatedServerFactory _factory;
 
-    public S3SdkTests(WebApplicationFactory<Program> factory)
+    public S3SdkTests(IsolatedServerFactory factory)
     {
         _factory = factory;
     }
@@ -328,6 +330,82 @@ public class S3SdkTests : IClassFixture<WebApplicationFactory<Program>>
                 await s3.DeleteBucketAsync(new DeleteBucketRequest { BucketName = bucket }, ct);
             }
             catch { }
+        }
+    }
+
+    [Fact]
+    public async Task VirtualHostedRequestsUseRoutedResourcesAndLifecyclePermissions()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var id = Guid.NewGuid().ToString("N");
+        var identity = new ScopedAuthenticator();
+        await using var factory = _factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services =>
+            {
+                services.Configure<S3Options>(o =>
+                {
+                    o.VirtualHostedStyle = true;
+                    o.Domains = ["s3.example.test"];
+                });
+                services.AddSingleton<ISigV4Authenticator>(identity);
+            })
+        );
+        using var http = factory.CreateClient();
+        var store = factory.Services.GetRequiredService<IStorageEngine>();
+        var iam = factory.Services.GetRequiredService<IamStore>();
+        var bucket = "reports-" + id;
+        await store.CreateBucketAsync(bucket, cancellationToken: ct);
+        await iam.CreateUserAsync(id, ct);
+        identity.AccessKey = (await iam.CreateAccessKeyAsync(id, ct)).AccessKey;
+        await iam.CreatePolicyAsync(
+            id,
+            new IamPolicyDocument
+            {
+                Statement =
+                [
+                    new()
+                    {
+                        Action = ["s3:GetObject", "s3:PutObject"],
+                        Resource = [$"arn:aws:s3:::{bucket}/files/*"],
+                    },
+                    new() { Action = ["s3:CreateBucket"], Resource = [$"arn:aws:s3:::{bucket}"] },
+                ],
+            },
+            ct: ct
+        );
+        await iam.AttachPolicyAsync(id, "user", id, ct);
+
+        http.DefaultRequestHeaders.Host = $"{bucket}.s3.example.test";
+        http.DefaultRequestHeaders.TryAddWithoutValidation("x-amz-date", "test");
+        using var write = await http.PutAsync(
+            "/files/report%20one",
+            new StringContent("report"),
+            ct
+        );
+        write.EnsureSuccessStatusCode();
+        Assert.Equal("/files/report one", identity.SignedPath);
+        using var copy = new HttpRequestMessage(HttpMethod.Put, "/files/copy");
+        copy.Headers.TryAddWithoutValidation("x-amz-copy-source", $"/{bucket}/files/report%20one");
+        using var copied = await http.SendAsync(copy, ct);
+        copied.EnsureSuccessStatusCode();
+        Assert.Equal("report", await http.GetStringAsync("/files/copy", ct));
+        using var lifecycle = await http.PutAsync("/?lifecycle", new StringContent(""), ct);
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, lifecycle.StatusCode);
+    }
+
+    private sealed class ScopedAuthenticator : ISigV4Authenticator
+    {
+        public string AccessKey { get; set; } = "";
+        public string? SignedPath { get; private set; }
+
+        public Task<bool> AuthenticateAsync(
+            HttpContext context,
+            CancellationToken cancellationToken = default
+        )
+        {
+            SignedPath = context.Request.Path.Value;
+            context.Items["AccessKey"] = AccessKey;
+            return Task.FromResult(true);
         }
     }
 

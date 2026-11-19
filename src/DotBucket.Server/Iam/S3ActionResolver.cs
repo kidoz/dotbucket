@@ -14,34 +14,12 @@ public static class S3ActionResolver
     public static (string Action, string Resource)? Resolve(HttpContext context)
     {
         var method = context.Request.Method;
-        var path = context.Request.Path.Value ?? "/";
         var query = context.Request.Query;
-
-        // Parse path segments: /bucket or /bucket/key...
-        var trimmed = path.TrimStart('/');
-        if (string.IsNullOrEmpty(trimmed))
-        {
-            // Service-level: GET / → ListAllMyBuckets
-            if (method == "GET")
-                return ("s3:ListAllMyBuckets", "arn:aws:s3:::*");
-            return null;
-        }
-
-        var slashIndex = trimmed.IndexOf('/');
-        string bucket;
-        string? key = null;
-
-        if (slashIndex < 0)
-        {
-            bucket = trimmed;
-        }
-        else
-        {
-            bucket = trimmed[..slashIndex];
-            key = trimmed[(slashIndex + 1)..];
-            if (string.IsNullOrEmpty(key))
-                key = null;
-        }
+        if (context.Request.RouteValues["bucket"] is not string bucket)
+            return method == "GET" && context.Request.Path == "/"
+                ? ("s3:ListAllMyBuckets", "arn:aws:s3:::*")
+                : null;
+        var key = context.Request.RouteValues["key"] as string;
 
         // Object-level operations (key is present)
         if (key != null)
@@ -70,10 +48,24 @@ public static class S3ActionResolver
         }
 
         // Bucket-level operations
+        // A bucket request can select only one operation. Reject conflicting selectors
+        // before dispatch so middleware and handlers cannot select different actions.
+        if (BucketSubresources.Count(query.ContainsKey) > 1)
+            return null;
+
         var bucketArn = $"arn:aws:s3:::{bucket}";
 
         return method switch
         {
+            "PUT" or "DELETE" when query.ContainsKey("lifecycle") => (
+                "s3:PutLifecycleConfiguration",
+                bucketArn
+            ),
+            "GET" when query.ContainsKey("lifecycle") => (
+                "s3:GetLifecycleConfiguration",
+                bucketArn
+            ),
+            "GET" when query.ContainsKey("location") => ("s3:GetBucketLocation", bucketArn),
             "PUT" when query.ContainsKey("versioning") => ("s3:PutBucketVersioning", bucketArn),
             "PUT" when query.ContainsKey("notification") => ("s3:PutBucketNotification", bucketArn),
             "PUT" when query.ContainsKey("object-lock") => (
@@ -96,26 +88,49 @@ public static class S3ActionResolver
         };
     }
 
-    /// <summary>
-    /// Parses the x-amz-copy-source header to produce the source object ARN for CopyObject authorization.
-    /// </summary>
-    public static string? ResolveCopySource(HttpContext context)
+    private static readonly string[] BucketSubresources =
+    [
+        "versioning",
+        "notification",
+        "object-lock",
+        "uploads",
+        "versions",
+        "location",
+        "lifecycle",
+        "delete",
+    ];
+
+    internal sealed record CopySource(string Bucket, string Key, string? VersionId);
+
+    internal static CopySource? ParseCopySource(HttpRequest request)
     {
-        var copySource = context.Request.Headers["x-amz-copy-source"].FirstOrDefault();
-        if (string.IsNullOrEmpty(copySource))
+        var values = request.Headers["x-amz-copy-source"];
+        if (values.Count != 1 || string.IsNullOrEmpty(values[0]))
             return null;
-
-        // Strip leading slash
-        var source = copySource.TrimStart('/');
-        // Strip query string (e.g. ?versionId=...)
-        var qIndex = source.IndexOf('?');
-        if (qIndex >= 0)
-            source = source[..qIndex];
-
-        // Must contain at least bucket/key
-        if (string.IsNullOrEmpty(source) || !source.Contains('/'))
-            return null;
-
-        return $"arn:aws:s3:::{source}";
+        var raw = values[0]!;
+        var queryStart = raw.IndexOf('?');
+        string? version = null;
+        if (queryStart >= 0)
+        {
+            var query = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(
+                raw[queryStart..]
+            );
+            if (
+                query.Count != 1
+                || !query.TryGetValue("versionId", out var ids)
+                || ids.Count != 1
+                || string.IsNullOrEmpty(ids[0])
+            )
+                return null;
+            version = ids[0];
+            raw = raw[..queryStart];
+        }
+        var path = Uri.UnescapeDataString(raw);
+        if (path.StartsWith('/'))
+            path = path[1..];
+        var slash = path.IndexOf('/');
+        return slash <= 0 || slash == path.Length - 1
+            ? null
+            : new CopySource(path[..slash], path[(slash + 1)..], version);
     }
 }

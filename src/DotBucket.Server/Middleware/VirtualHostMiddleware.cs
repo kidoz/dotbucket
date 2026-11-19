@@ -13,9 +13,7 @@ namespace DotBucket.Server.Middleware;
 /// equivalent path-style form ("/{bucket}/key") so the existing path-style
 /// endpoints handle them.
 ///
-/// IMPORTANT: this middleware MUST run AFTER <see cref="S3AuthMiddleware"/> so the
-/// SigV4 signature is verified against the original Host header and path. Only the
-/// request Path is rewritten here; the Host header is never mutated.
+/// Runs before endpoint routing. Signature verification uses the saved original path.
 /// </summary>
 public class VirtualHostMiddleware(
     RequestDelegate next,
@@ -51,14 +49,13 @@ public class VirtualHostMiddleware(
                 if (!host.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                var label = host[..^suffix.Length];
-                var dot = label.IndexOf('.');
-                var bucket = dot >= 0 ? label[..dot] : label; // leading label only
+                var bucket = host[..^suffix.Length];
 
                 // Skip empty or reserved names (e.g. "admin.s3.example.com").
                 if (string.IsNullOrEmpty(bucket) || S3Endpoints.IsReservedBucketNamePublic(bucket))
                     break;
 
+                context.Items[typeof(VirtualHostMiddleware)] = context.Request.Path;
                 var original = context.Request.Path.Value;
                 context.Request.Path =
                     string.IsNullOrEmpty(original) || original == "/"

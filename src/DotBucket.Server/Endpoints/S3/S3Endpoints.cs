@@ -5,6 +5,7 @@ using System.Buffers;
 using System.Text;
 using System.Xml;
 using System.Xml.Linq;
+using DotBucket.Server.Iam;
 using DotBucket.Server.Middleware;
 using DotBucket.Server.Models;
 using DotBucket.Server.Storage;
@@ -806,45 +807,17 @@ public static class S3Endpoints
                 }
 
                 // CopyObject
-                var copySource = context.Request.Headers["x-amz-copy-source"].ToString();
-                if (!string.IsNullOrEmpty(copySource))
+                if (
+                    context.Items[typeof(S3ActionResolver.CopySource)]
+                    is S3ActionResolver.CopySource source
+                )
                 {
-                    // Parse source: /bucket/key or bucket/key, optionally ?versionId=...
-                    copySource = Uri.UnescapeDataString(copySource);
-                    if (copySource.StartsWith('/'))
-                        copySource = copySource[1..];
-
-                    string? srcVersionId = null;
-                    var qIdx = copySource.IndexOf('?');
-                    if (qIdx >= 0)
-                    {
-                        var qs = copySource[(qIdx + 1)..];
-                        copySource = copySource[..qIdx];
-                        if (qs.StartsWith("versionId="))
-                            srcVersionId = qs["versionId=".Length..];
-                    }
-
-                    var slashIdx = copySource.IndexOf('/');
-                    if (slashIdx < 0)
-                    {
-                        await S3ErrorResponses.WriteErrorAsync(
-                            context,
-                            400,
-                            "InvalidArgument",
-                            "Invalid x-amz-copy-source header."
-                        );
-                        return Results.Empty;
-                    }
-
-                    var srcBucket = copySource[..slashIdx];
-                    var srcKey = copySource[(slashIdx + 1)..];
-
                     try
                     {
                         var result = await storageEngine.CopyObjectAsync(
-                            srcBucket,
-                            srcKey,
-                            srcVersionId,
+                            source.Bucket,
+                            source.Key,
+                            source.VersionId,
                             bucket,
                             key,
                             cancellationToken: context.RequestAborted

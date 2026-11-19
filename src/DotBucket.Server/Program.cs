@@ -280,6 +280,8 @@ if (!app.Environment.IsDevelopment())
 }
 app.UseHttpsRedirection();
 
+app.UseMiddleware<VirtualHostMiddleware>();
+app.UseRouting();
 app.UseCors("AllowFrontend");
 
 // Content-Security-Policy: defense-in-depth against XSS in the admin SPA.
@@ -362,9 +364,6 @@ app.UseWhen(
         {
             appBuilder.UseRateLimiter();
         }
-        // Runs AFTER signature verification so rewriting the path to inject the bucket
-        // (for virtual-hosted-style requests) cannot invalidate the SigV4 signature.
-        appBuilder.UseMiddleware<VirtualHostMiddleware>();
         appBuilder.UseMiddleware<S3AuthorizationMiddleware>();
     }
 );

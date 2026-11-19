@@ -96,33 +96,34 @@ public class S3AuthorizationMiddleware(
         }
 
         // CopyObject dual-auth: if this is a PutObject with x-amz-copy-source, also check GetObject on source
-        if (action == "s3:PutObject")
+        if (context.Request.Headers.ContainsKey("x-amz-copy-source"))
         {
-            var sourceArn = S3ActionResolver.ResolveCopySource(context);
-            if (sourceArn != null)
+            var source = S3ActionResolver.ParseCopySource(context.Request);
+            if (action != "s3:PutObject" || source == null || context.Request.Method != "PUT")
             {
-                var sourceContext = new S3AuthorizationContext
-                {
-                    Action = "s3:GetObject",
-                    Resource = sourceArn,
-                    AccessKey = accessKey,
-                };
-
-                var sourceResult = await policyEngine.EvaluateAsync(
-                    sourceContext,
-                    context.RequestAborted
+                await S3ErrorResponses.WriteErrorAsync(
+                    context,
+                    400,
+                    "InvalidArgument",
+                    "Invalid copy source."
                 );
-                if (sourceResult != AuthorizationResult.Allow)
-                {
-                    logger.LogWarning(
-                        "Access denied for {AccessKey} on copy source {Resource}",
-                        accessKey,
-                        sourceArn
-                    );
-                    await S3ErrorResponses.AccessDeniedAsync(context);
-                    return;
-                }
+                return;
             }
+            var sourceContext = new S3AuthorizationContext
+            {
+                Action = source.VersionId == null ? "s3:GetObject" : "s3:GetObjectVersion",
+                Resource = $"{ArnPrefix}{source.Bucket}/{source.Key}",
+                AccessKey = accessKey,
+            };
+            if (
+                await policyEngine.EvaluateAsync(sourceContext, context.RequestAborted)
+                != AuthorizationResult.Allow
+            )
+            {
+                await S3ErrorResponses.AccessDeniedAsync(context);
+                return;
+            }
+            context.Items[typeof(S3ActionResolver.CopySource)] = source;
         }
 
         await next(context);

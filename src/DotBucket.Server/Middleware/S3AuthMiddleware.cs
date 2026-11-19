@@ -41,10 +41,21 @@ public class S3AuthMiddleware(RequestDelegate next, ILogger<S3AuthMiddleware> lo
         }
 
         // Validate SigV4 authentication
-        var isAuthenticated = await authenticator.AuthenticateAsync(
-            context,
-            context.RequestAborted
-        );
+        var routedPath = context.Request.Path;
+        bool isAuthenticated;
+        try
+        {
+            if (context.Items[typeof(VirtualHostMiddleware)] is PathString signedPath)
+                context.Request.Path = signedPath;
+            isAuthenticated = await authenticator.AuthenticateAsync(
+                context,
+                context.RequestAborted
+            );
+        }
+        finally
+        {
+            context.Request.Path = routedPath;
+        }
         if (!isAuthenticated)
         {
             logger.LogWarning("Request to {Path} failed S3 authentication.", context.Request.Path);

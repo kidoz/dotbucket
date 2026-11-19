@@ -5,18 +5,57 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using AwesomeAssertions;
+using DotBucket.Server.Configuration;
 using DotBucket.Server.Models;
-using Microsoft.AspNetCore.Mvc.Testing;
+using DotBucket.Server.Storage;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace DotBucket.Server.IntegrationTests;
 
-public class AdminBucketTests : IClassFixture<WebApplicationFactory<Program>>
+public class AdminBucketTests : IClassFixture<IsolatedServerFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly IsolatedServerFactory _factory;
 
-    public AdminBucketTests(WebApplicationFactory<Program> factory)
+    public AdminBucketTests(IsolatedServerFactory factory)
     {
         _factory = factory;
+    }
+
+    [Fact]
+    public async Task DownloadReturnsTheSelectedHistoricalVersion()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var client = _factory.CreateClient();
+        var services = _factory.Services;
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer",
+            services.GetRequiredService<IOptions<AuthOptions>>().Value.AdminToken
+        );
+        var storage = services.GetRequiredService<IStorageEngine>();
+        var bucket = "history-" + Guid.NewGuid().ToString("N");
+        await storage.CreateBucketAsync(bucket, true, ct);
+        const string key = "reports/annual report";
+        var first = await storage.PutObjectAsync(
+            bucket,
+            key,
+            new MemoryStream([1]),
+            "application/pdf",
+            cancellationToken: ct
+        );
+        await storage.PutObjectAsync(
+            bucket,
+            key,
+            new MemoryStream([2]),
+            "application/pdf",
+            cancellationToken: ct
+        );
+        var path = $"/admin/buckets/{bucket}/download/reports/annual%20report";
+        Assert.Equal(
+            new byte[] { 1 },
+            await client.GetByteArrayAsync($"{path}?versionId={first.VersionId}", ct)
+        );
+        Assert.Equal(new byte[] { 2 }, await client.GetByteArrayAsync(path, ct));
     }
 
     [Fact]

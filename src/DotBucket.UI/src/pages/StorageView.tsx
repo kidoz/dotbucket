@@ -49,7 +49,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Search,
-  Info
+  Info,
 } from 'lucide-react';
 
 interface UploadProgress {
@@ -109,7 +109,7 @@ export function StorageView() {
           versions,
           page,
           pageSize,
-          prefix || undefined,
+          prefix || undefined
         );
         setObjects(data.objects);
         setTotalObjectCount(data.totalCount);
@@ -119,7 +119,7 @@ export function StorageView() {
         setLoading(false);
       }
     },
-    [pageSize],
+    [pageSize]
   );
 
   const loadVersioning = useCallback(async (bucketName: string) => {
@@ -155,7 +155,15 @@ export function StorageView() {
       setVersioningStatus('Off');
       setNotifications([]);
     }
-  }, [selectedBucket, showVersions, currentPage, searchPrefix, loadObjects, loadVersioning, loadNotifications]);
+  }, [
+    selectedBucket,
+    showVersions,
+    currentPage,
+    searchPrefix,
+    loadObjects,
+    loadVersioning,
+    loadNotifications,
+  ]);
 
   const handleSetVersioning = async (status: string) => {
     if (!selectedBucket) return;
@@ -264,7 +272,7 @@ export function StorageView() {
         try {
           await apiClient.uploadObject(selectedBucket, files[i], (loaded, total) => {
             setUploadProgress((prev) =>
-              prev.map((p, idx) => (idx === i ? { ...p, loaded, total } : p)),
+              prev.map((p, idx) => (idx === i ? { ...p, loaded, total } : p))
             );
           });
         } catch (err) {
@@ -276,7 +284,7 @@ export function StorageView() {
       setUploadProgress([]);
       await loadObjects(selectedBucket, showVersions, currentPage, searchPrefix);
     },
-    [selectedBucket, showVersions, currentPage, searchPrefix, loadObjects],
+    [selectedBucket, showVersions, currentPage, searchPrefix, loadObjects]
   );
 
   const handleDeleteObject = (key: string, versionId?: string) => {
@@ -301,10 +309,10 @@ export function StorageView() {
     });
   };
 
-  const handleDownload = async (objectKey: string) => {
+  const handleDownload = async (objectKey: string, versionId?: string) => {
     if (!selectedBucket) return;
     try {
-      const blob = await apiClient.downloadObject(selectedBucket, objectKey);
+      const blob = await apiClient.downloadObject(selectedBucket, objectKey, versionId);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -365,9 +373,7 @@ export function StorageView() {
                 <Plus className="h-4 w-4" />
               </Button>
             </div>
-            {bucketNameError && (
-              <p className="mb-3 text-xs text-red-600">{bucketNameError}</p>
-            )}
+            {bucketNameError && <p className="mb-3 text-xs text-red-600">{bucketNameError}</p>}
 
             <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
               {buckets.length === 0 && !loading && (
@@ -418,7 +424,7 @@ export function StorageView() {
         </Card>
 
         {/* Objects List */}
-        <Card className="col-span-1 md:col-span-2 lg:col-span-3 shadow-sm">
+        <Card className="col-span-1 shadow-sm md:col-span-2 lg:col-span-3">
           <CardHeader className="flex flex-col space-y-4">
             <div className="flex flex-row items-center justify-between">
               <div>
@@ -551,9 +557,7 @@ export function StorageView() {
                       <div key={idx} className="space-y-1">
                         <div className="flex items-center justify-between text-xs text-slate-600">
                           <span className="truncate">{p.fileName}</span>
-                          <span>
-                            {p.total > 0 ? Math.round((p.loaded / p.total) * 100) : 0}%
-                          </span>
+                          <span>{p.total > 0 ? Math.round((p.loaded / p.total) * 100) : 0}%</span>
                         </div>
                         <Progress
                           value={p.total > 0 ? (p.loaded / p.total) * 100 : 0}
@@ -655,7 +659,12 @@ export function StorageView() {
                                 <Button
                                   variant="ghost"
                                   size="icon"
-                                  onClick={() => handleDownload(obj.objectKey)}
+                                  onClick={() =>
+                                    handleDownload(
+                                      obj.objectKey,
+                                      showVersions ? obj.versionId : undefined
+                                    )
+                                  }
                                   className="h-8 w-8 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
                                   title="Download"
                                 >
@@ -668,7 +677,7 @@ export function StorageView() {
                                 onClick={() =>
                                   handleDeleteObject(
                                     obj.objectKey,
-                                    showVersions ? obj.versionId : undefined,
+                                    showVersions ? obj.versionId : undefined
                                   )
                                 }
                                 className="h-8 w-8 text-red-500 hover:bg-red-50 hover:text-red-700"
@@ -746,17 +755,19 @@ export function StorageView() {
             <div className="space-y-4 py-4">
               <div className="grid grid-cols-3 gap-4 text-sm">
                 <div className="text-slate-500">ETag</div>
-                <div className="col-span-2 font-mono text-xs break-all">{selectedObject.eTag}</div>
-                
+                <div className="col-span-2 break-all font-mono text-xs">{selectedObject.eTag}</div>
+
                 <div className="text-slate-500">Content-Type</div>
                 <div className="col-span-2">{selectedObject.contentType}</div>
-                
+
                 <div className="text-slate-500">Version ID</div>
                 <div className="col-span-2 font-mono text-xs">{selectedObject.versionId}</div>
-                
+
                 <div className="text-slate-500">Last Modified</div>
-                <div className="col-span-2">{new Date(selectedObject.lastModified).toLocaleString()}</div>
-                
+                <div className="col-span-2">
+                  {new Date(selectedObject.lastModified).toLocaleString()}
+                </div>
+
                 <div className="text-slate-500">Size</div>
                 <div className="col-span-2">{(selectedObject.size / 1024).toFixed(2)} KB</div>
 
@@ -776,7 +787,7 @@ export function StorageView() {
                 <div className="col-span-2">
                   <div className="space-y-1">
                     {selectedObject.lockStatus.legalHold && (
-                      <span className="flex items-center text-orange-600 font-semibold">
+                      <span className="flex items-center font-semibold text-orange-600">
                         <ShieldAlert className="mr-1 h-3 w-3" />
                         Legal Hold Active
                       </span>
@@ -784,28 +795,34 @@ export function StorageView() {
                     {selectedObject.lockStatus.retentionMode ? (
                       <span className="flex items-center text-indigo-600">
                         <History className="mr-1 h-3 w-3" />
-                        {selectedObject.lockStatus.retentionMode} until {new Date(selectedObject.lockStatus.retainUntilDate!).toLocaleDateString()}
+                        {selectedObject.lockStatus.retentionMode} until{' '}
+                        {new Date(selectedObject.lockStatus.retainUntilDate!).toLocaleDateString()}
                       </span>
-                    ) : !selectedObject.lockStatus.legalHold && (
-                      <span className="text-slate-400">No locks active</span>
+                    ) : (
+                      !selectedObject.lockStatus.legalHold && (
+                        <span className="text-slate-400">No locks active</span>
+                      )
                     )}
                   </div>
                 </div>
               </div>
-              
+
               <div className="border-t pt-4">
                 <Label className="mb-2 block">Custom Metadata</Label>
                 {Object.keys(selectedObject.metadata).length > 0 ? (
                   <div className="space-y-1">
                     {Object.entries(selectedObject.metadata).map(([k, v]) => (
-                      <div key={k} className="flex justify-between text-xs p-1.5 bg-slate-50 rounded border">
+                      <div
+                        key={k}
+                        className="flex justify-between rounded border bg-slate-50 p-1.5 text-xs"
+                      >
                         <span className="font-semibold">{k}</span>
                         <span className="text-slate-600">{v}</span>
                       </div>
                     ))}
                   </div>
                 ) : (
-                  <p className="text-xs text-slate-500 italic">No custom metadata.</p>
+                  <p className="text-xs italic text-slate-500">No custom metadata.</p>
                 )}
               </div>
             </div>

@@ -57,7 +57,7 @@ export const apiClient = {
     versions: boolean = false,
     page: number = 1,
     pageSize: number = 50,
-    prefix?: string,
+    prefix?: string
   ): Promise<{ objects: StorageObject[]; totalCount: number }> => {
     const params = new URLSearchParams({
       versions: String(versions),
@@ -94,7 +94,7 @@ export const apiClient = {
 
   setNotifications: async (
     bucketName: string,
-    notifications: NotificationConfiguration[],
+    notifications: NotificationConfiguration[]
   ): Promise<void> => {
     const res = await apiFetch(`${API_BASE}/buckets/${bucketName}/notifications`, {
       method: 'POST',
@@ -107,7 +107,7 @@ export const apiClient = {
   uploadObject: async (
     bucketName: string,
     file: File,
-    onProgress?: (loaded: number, total: number) => void,
+    onProgress?: (loaded: number, total: number) => void
   ): Promise<StorageObject> => {
     const formData = new FormData();
     formData.append('file', file);
@@ -144,7 +144,11 @@ export const apiClient = {
     return res.json();
   },
 
-  deleteObject: async (bucketName: string, objectKey: string, versionId?: string): Promise<void> => {
+  deleteObject: async (
+    bucketName: string,
+    objectKey: string,
+    versionId?: string
+  ): Promise<void> => {
     let url = `${API_BASE}/buckets/${bucketName}/objects/${encodeURIComponent(objectKey)}`;
     if (versionId) url += `?versionId=${versionId}`;
     const res = await apiFetch(url, {
@@ -153,9 +157,13 @@ export const apiClient = {
     if (!res.ok) throw new Error('Failed to delete object');
   },
 
-  downloadObject: async (bucketName: string, objectKey: string): Promise<Blob> => {
+  downloadObject: async (
+    bucketName: string,
+    objectKey: string,
+    versionId?: string
+  ): Promise<Blob> => {
     const res = await apiFetch(
-      `${API_BASE}/buckets/${bucketName}/download/${encodeURIComponent(objectKey)}`,
+      `${API_BASE}/buckets/${bucketName}/download/${objectKey.split('/').map(encodeURIComponent).join('/')}${versionId ? `?${new URLSearchParams({ versionId })}` : ''}`
     );
     if (!res.ok) throw new Error('Failed to download object');
     return res.blob();

@@ -255,6 +255,7 @@ public static class AdminEndpoints
             async (
                 string bucketName,
                 string objectKey,
+                string? versionId,
                 IStorageEngine storageEngine,
                 CancellationToken cancellationToken
             ) =>
@@ -262,6 +263,7 @@ public static class AdminEndpoints
                 var result = await storageEngine.GetObjectAsync(
                     bucketName,
                     objectKey,
+                    versionId,
                     cancellationToken: cancellationToken
                 );
                 if (result == null)

@@ -215,8 +215,8 @@ DotBucket is built around the `IStorageEngine` interface, allowing it to seamles
 
 - **Local Storage (`LocalFileSystemStorageEngine`)**:
   - **Metadata**: Uses **SQLite** (configured with WAL mode) for performant, concurrent metadata tracking.
-  - **Data Integrity**: Implements atomic writes by first writing to `.tmp` files and then moving them to the final destination.
-  - **Concurrency**: Manages per-object write locking using a `ConcurrentDictionary` of `SemaphoreSlim`.
+  - **Data Integrity**: Flushes each new blob to disk before a SQLite transaction publishes its identity and metadata.
+  - **Concurrency**: Serializes uploads and publication using bounded sets of locks keyed by bucket and object.
 - **Distributed Storage (`DistributedStorageEngine`)**:
   - **Bucket Management**: Uses a **Leader node** to coordinate and replicate bucket metadata changes across all peers.
   - **Object Placement**: Utilizes **Rendezvous Hashing** (Highest Random Weight) via `RendezvousHashRing` for stable, decentralized object-to-node mapping.
@@ -224,16 +224,11 @@ DotBucket is built around the `IStorageEngine` interface, allowing it to seamles
 
 ### Storage Layout on Disk
 
-```
-{RootPath}/
-├── metadata.db                 # SQLite database for all metadata
-├── my-bucket/
-│   ├── photo.jpg               # Object data (latest version or unversioned)
-│   ├── photo.jpg.v1            # Versioned object (if versioning enabled)
-│   └── docs/
-│       └── readme.txt
-└── another-bucket/
-```
+The storage root contains `metadata.db` and the bucket data directory. When configured, `Storage:BasePrefix` selects a subdirectory for bucket data. Inside that directory, `_internal/blobs/` holds immutable object bytes, `_internal/staging/` holds writes in progress, and `_internal/uploads/` holds multipart uploads. SQLite maps each bucket, key, and version to its blob. Existing objects and in-progress uploads written by older versions remain readable in their original locations.
+
+**Upgrading a cluster requires a coordinated restart.** Stop writes and all nodes, back up the storage roots, upgrade every node, and then resume service. This release changes both the database schema and the inter-node write protocol. A downgrade requires restoring the pre-upgrade backup.
+
+For a clustered PUT, the primary stages the object and streams it to the owners. Once enough owners have durably staged the bytes, the coordinator records its local commit and the pending replica confirmations in one SQLite transaction. The client receives success after the configured number of owners confirm publication. A lost confirmation can leave a write committed while the client sees an error. The health monitor retries pending confirmations after connectivity returns or the coordinator restarts.
 
 ## Roadmap
 [07_Change_Log.md](../../Documents/LIFEOS_Tech_Spec_AI_Architecture_Costs_MobileFirst/07_Change_Log.md)

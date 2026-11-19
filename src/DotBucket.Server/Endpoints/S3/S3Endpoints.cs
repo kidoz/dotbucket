@@ -1221,12 +1221,21 @@ public static class S3Endpoints
                 // List Parts
                 if (uploadId != null)
                 {
-                    var parts = await storageEngine.ListPartsAsync(
-                        bucket,
-                        key,
-                        uploadId,
-                        context.RequestAborted
-                    );
+                    IEnumerable<PartInfo> parts;
+                    try
+                    {
+                        parts = await storageEngine.ListPartsAsync(
+                            bucket,
+                            key,
+                            uploadId,
+                            context.RequestAborted
+                        );
+                    }
+                    catch (InvalidOperationException ex) when (ex.Message == "NoSuchUpload")
+                    {
+                        await S3ErrorResponses.NoSuchUploadAsync(context);
+                        return Results.Empty;
+                    }
                     var partsList = parts.ToList();
 
                     var settings = new XmlWriterSettings
@@ -1443,12 +1452,20 @@ public static class S3Endpoints
 
                 if (uploadId != null)
                 {
-                    await storageEngine.AbortMultipartUploadAsync(
-                        bucket,
-                        key,
-                        uploadId,
-                        context.RequestAborted
-                    );
+                    try
+                    {
+                        await storageEngine.AbortMultipartUploadAsync(
+                            bucket,
+                            key,
+                            uploadId,
+                            context.RequestAborted
+                        );
+                    }
+                    catch (InvalidOperationException ex) when (ex.Message == "NoSuchUpload")
+                    {
+                        await S3ErrorResponses.NoSuchUploadAsync(context);
+                        return Results.Empty;
+                    }
                     return Results.NoContent();
                 }
 

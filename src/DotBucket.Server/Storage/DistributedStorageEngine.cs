@@ -39,8 +39,13 @@ public class DistributedStorageEngine(
             {
                 try
                 {
-                    await nodeClient.CreateBucketAsync(peer.Address, bucketName, cancellationToken);
-                    return true;
+                    var replica = await nodeClient.CreateBucketAsync(
+                        peer.Address,
+                        bucketName,
+                        objectLock,
+                        cancellationToken
+                    );
+                    return replica?.ObjectLock.Enabled == objectLock;
                 }
                 catch (Exception ex)
                 {
@@ -55,7 +60,9 @@ public class DistributedStorageEngine(
             var results = await Task.WhenAll(tasks);
             successCount += results.Count(r => r);
 
-            var requiredQuorum = (cluster.AllNodes.Count / 2) + 1;
+            var requiredQuorum = objectLock
+                ? cluster.AllNodes.Count
+                : (cluster.AllNodes.Count / 2) + 1;
             if (successCount < requiredQuorum)
             {
                 // Roll back local create to prevent divergence
@@ -84,7 +91,9 @@ public class DistributedStorageEngine(
         var result = await nodeClient.CreateBucketAsync(
             leader.Address,
             bucketName,
-            cancellationToken
+            objectLock,
+            cancellationToken,
+            coordinate: true
         );
         return result ?? throw new InvalidOperationException("Leader failed to create bucket.");
     }
@@ -485,8 +494,7 @@ public class DistributedStorageEngine(
                 ?? throw new InvalidOperationException("Primary node failed to store object.");
         }
 
-        // We are the primary node: save locally first
-        var localResult = await local.PutObjectAsync(
+        return await PutOnPrimaryAsync(
             bucketName,
             objectKey,
             content,
@@ -495,96 +503,180 @@ public class DistributedStorageEngine(
             encryption,
             cancellationToken
         );
+    }
 
-        var successCount = 1; // local write succeeded
+    internal Task<StorageObject> PutOnPrimaryAsync(
+        string bucket,
+        string key,
+        Stream content,
+        string contentType,
+        Dictionary<string, string>? metadata,
+        string? encryption,
+        CancellationToken ct
+    )
+    {
+        if (!placement.IsPrimaryOwner(bucket, key))
+            throw new InvalidOperationException("Cluster placement changed before the write.");
+        return local.PutObjectAsync(
+            bucket,
+            key,
+            content,
+            contentType,
+            metadata,
+            encryption,
+            ct,
+            null,
+            ReplicateAsync
+        );
+    }
 
-        // Replicate to other nodes in the preference list and wait for quorum
-        var replicaTargets = preferenceList.Skip(1).ToList();
-        if (replicaTargets.Count > 0)
+    private async Task ReplicateAsync(StorageObject obj, string stagedPath, CancellationToken ct)
+    {
+        var owners = placement.GetPreferenceList(obj.BucketName, obj.ObjectKey);
+        var targets = owners.Where(n => !n.IsSelf).ToList();
+        var localVotes = owners.Any(n => n.IsSelf) ? 1 : 0;
+        if (owners.Count < _options.WriteQuorum)
+            throw new InvalidOperationException("Insufficient healthy owners for write quorum.");
+
+        var operation = Guid.NewGuid();
+        var prepared = new List<NodeInfo>();
+        var committedLocally = false;
+        try
         {
-            var replicaTasks = replicaTargets
-                .Select(async target =>
+            // Each request streams the immutable staged file with bounded memory.
+            foreach (var target in targets)
+            {
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    await using var content = local.OpenStagedContent(
+                        stagedPath,
+                        obj.Encryption == "AES256"
+                    );
+                    await nodeClient.PrepareReplicaAsync(
+                        target.Address,
+                        operation,
+                        content,
+                        obj,
+                        ct
+                    );
+                    prepared.Add(target);
+                }
+                catch (Exception ex)
+                    when (ex is HttpRequestException
+                        || ex is OperationCanceledException && !ct.IsCancellationRequested
+                    )
+                {
+                    logger.LogWarning(
+                        ex,
+                        "Replica {NodeId} could not stage write {Operation}",
+                        target.NodeId,
+                        operation
+                    );
+                }
+            }
+            if (prepared.Count + localVotes < _options.WriteQuorum)
+                throw new InvalidOperationException(
+                    "Write quorum not met during replica preparation."
+                );
+
+            // The same SQLite transaction publishes the local blob and records the durable
+            // commit decision for every prepared peer. Restart can finish lost notifications.
+            await local.CommitLocalAsync(
+                obj,
+                stagedPath,
+                operation,
+                prepared.Select(n => n.NodeId).ToArray(),
+                ct
+            );
+            committedLocally = true;
+            var acknowledgments = localVotes;
+            foreach (var target in prepared)
+                if (await TryCommitReplicaAsync(target, operation, obj, CancellationToken.None))
+                    acknowledgments++;
+            if (acknowledgments < _options.WriteQuorum)
+                throw new InvalidOperationException(
+                    "Write committed locally; replica confirmations pending."
+                );
+        }
+        finally
+        {
+            if (!committedLocally)
+                foreach (var target in targets)
                 {
                     try
                     {
-                        var replicaReadResult = await local.GetObjectAsync(
-                            bucketName,
-                            objectKey,
-                            localResult.VersionId,
-                            cancellationToken
-                        );
-                        if (replicaReadResult != null)
-                        {
-                            await using var replicaStream = replicaReadResult.Value.Content;
-                            await nodeClient.PutObjectAsync(
-                                target.Address,
-                                bucketName,
-                                objectKey,
-                                replicaStream,
-                                localResult.ContentType,
-                                localResult.Metadata,
-                                cancellationToken,
-                                localResult.VersionId,
-                                localResult.Encryption
-                            );
-                            return true;
-                        }
-                        return false;
+                        await nodeClient.DiscardReplicaStageAsync(target.Address, operation);
                     }
                     catch (Exception ex)
                     {
                         logger.LogWarning(
                             ex,
-                            "Failed to replicate PUT {Bucket}/{Key} to {NodeId}",
-                            bucketName,
-                            objectKey,
+                            "Failed to discard staging file for {Operation} on {NodeId}",
+                            operation,
                             target.NodeId
                         );
-                        return false;
                     }
-                })
-                .ToList();
-
-            var results = await Task.WhenAll(replicaTasks);
-            successCount += results.Count(r => r);
+                }
         }
+    }
 
-        if (successCount < _options.WriteQuorum)
+    private async Task<bool> TryCommitReplicaAsync(
+        NodeInfo node,
+        Guid operation,
+        StorageObject obj,
+        CancellationToken ct
+    )
+    {
+        try
         {
-            logger.LogError(
-                "Write quorum not met for PUT {Bucket}/{Key}: {Count}/{Quorum}",
-                bucketName,
-                objectKey,
-                successCount,
-                _options.WriteQuorum
-            );
-
-            // Roll back local write to prevent divergence
             try
             {
-                await local.DeleteObjectAsync(
-                    bucketName,
-                    objectKey,
-                    localResult.VersionId,
-                    cancellationToken
-                );
+                await nodeClient.CommitReplicaAsync(node.Address, operation, obj, ct);
             }
-            catch (Exception ex)
+            catch (HttpRequestException ex)
+                when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
             {
-                logger.LogError(
-                    ex,
-                    "Failed to roll back local write for {Bucket}/{Key}",
-                    bucketName,
-                    objectKey
+                // A peer may have reaped an abandoned preparation during a long outage.
+                // Replay from the exact committed generation recorded in the journal.
+                await using var content = local.OpenCommittedBlob(
+                    operation,
+                    obj.Encryption == "AES256"
                 );
+                await nodeClient.PrepareReplicaAsync(
+                    node.Address,
+                    operation,
+                    content,
+                    obj,
+                    ct,
+                    replay: true
+                );
+                await nodeClient.CommitReplicaAsync(node.Address, operation, obj, ct);
             }
-
-            throw new InvalidOperationException(
-                $"Write quorum not met: {successCount}/{_options.WriteQuorum} nodes acknowledged the write."
-            );
+            await local.ConfirmReplicaAsync(operation, node.NodeId, ct);
+            return true;
         }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(
+                ex,
+                "Will retry commit {Operation} on {NodeId}",
+                operation,
+                node.NodeId
+            );
+            return false;
+        }
+    }
 
-        return localResult;
+    internal async Task RetryPendingCommitsAsync(CancellationToken ct)
+    {
+        local.ReapAbandonedReplicaStages();
+        foreach (var (obj, nodeId) in await local.PendingReplicaCommitsAsync(ct))
+        {
+            var node = cluster.AllNodes.FirstOrDefault(n => n.NodeId == nodeId);
+            if (node != null)
+                await TryCommitReplicaAsync(node, Guid.ParseExact(obj.BlobId!, "N"), obj, ct);
+        }
     }
 
     public async Task<bool> DeleteObjectAsync(
@@ -1002,105 +1094,14 @@ public class DistributedStorageEngine(
         CancellationToken cancellationToken = default
     )
     {
-        // Complete locally first
-        var result = await local.CompleteMultipartUploadAsync(
+        return await local.CompleteMultipartUploadAsync(
             bucketName,
             objectKey,
             uploadId,
             parts,
-            cancellationToken
+            cancellationToken,
+            ReplicateAsync
         );
-
-        // Then replicate the completed object to other nodes in the preference list
-        var replicaTargets = placement.GetReplicaTargets(bucketName, objectKey);
-        if (replicaTargets.Count <= 0)
-        {
-            return result;
-        }
-
-        var localResult = await local.GetObjectAsync(
-            bucketName,
-            objectKey,
-            result.VersionId,
-            cancellationToken
-        );
-        if (localResult == null)
-        {
-            return result;
-        }
-
-        var (meta, content) = localResult.Value;
-        using var buffer = new MemoryStream();
-        await content.CopyToAsync(buffer, cancellationToken);
-        await content.DisposeAsync();
-
-        var successCount = 1; // local complete succeeded
-        var tasks = replicaTargets.Select(async node =>
-        {
-            try
-            {
-                var ms = new MemoryStream(buffer.ToArray());
-                await nodeClient.PutObjectAsync(
-                    node.Address,
-                    bucketName,
-                    objectKey,
-                    ms,
-                    meta.ContentType,
-                    meta.Metadata,
-                    cancellationToken,
-                    result.VersionId,
-                    meta.Encryption
-                );
-                return true;
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(
-                    ex,
-                    "Failed to replicate completed multipart to {NodeId}",
-                    node.NodeId
-                );
-                return false;
-            }
-        });
-        var replicationResults = await Task.WhenAll(tasks);
-        successCount += replicationResults.Count(r => r);
-
-        if (successCount < _options.WriteQuorum)
-        {
-            logger.LogError(
-                "Write quorum not met for completed multipart {Bucket}/{Key}: {Count}/{Quorum}",
-                bucketName,
-                objectKey,
-                successCount,
-                _options.WriteQuorum
-            );
-
-            try
-            {
-                await local.DeleteObjectAsync(
-                    bucketName,
-                    objectKey,
-                    result.VersionId,
-                    cancellationToken
-                );
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(
-                    ex,
-                    "Failed to roll back completed multipart object for {Bucket}/{Key}",
-                    bucketName,
-                    objectKey
-                );
-            }
-
-            throw new InvalidOperationException(
-                $"Write quorum not met: {successCount}/{_options.WriteQuorum} nodes acknowledged completed multipart upload."
-            );
-        }
-
-        return result;
     }
 
     public Task AbortMultipartUploadAsync(

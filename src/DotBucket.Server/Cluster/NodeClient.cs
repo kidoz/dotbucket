@@ -61,18 +61,17 @@ public class NodeClient(IHttpClientFactory httpClientFactory, IOptions<ClusterOp
         string contentType,
         Dictionary<string, string>? metadata,
         CancellationToken ct,
-        string? versionId = null,
         string? encryption = null
     )
     {
         using var client = CreateClient();
         using var request = new HttpRequestMessage(
             HttpMethod.Put,
-            $"{nodeAddress.TrimEnd('/')}/_internal/objects/{Uri.EscapeDataString(bucket)}/{EncodeKeySegments(key)}"
+            $"{nodeAddress.TrimEnd('/')}/_internal/coordinator/objects/{Uri.EscapeDataString(bucket)}/{EncodeKeySegments(key)}"
         );
 
         var streamContent = new StreamContent(content);
-        streamContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(
+        streamContent.Headers.ContentType = System.Net.Http.Headers.MediaTypeHeaderValue.Parse(
             contentType
         );
         request.Content = streamContent;
@@ -85,22 +84,61 @@ public class NodeClient(IHttpClientFactory httpClientFactory, IOptions<ClusterOp
             }
         }
 
-        if (versionId != null)
-        {
-            request.Headers.TryAddWithoutValidation("X-DotBucket-VersionId", versionId);
-        }
-
         if (encryption != null)
         {
             request.Headers.TryAddWithoutValidation("X-DotBucket-Encryption", encryption);
         }
 
-        var response = await client.SendAsync(request, ct);
+        using var response = await client.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync(
             StorageObjectJsonContext.Default.StorageObject,
             ct
         );
+    }
+
+    private static string StageUrl(string address, Guid operation) =>
+        $"{address.TrimEnd('/')}/_internal/staged/{operation:N}";
+
+    internal async Task PrepareReplicaAsync(
+        string address,
+        Guid operation,
+        Stream stream,
+        StorageObject obj,
+        CancellationToken ct,
+        bool replay = false
+    )
+    {
+        using var client = CreateClient();
+        using var content = new StreamContent(stream);
+        content.Headers.ContentLength = obj.Size;
+        using var response = await client.PutAsync(
+            StageUrl(address, operation)
+                + $"?replay={replay}&encrypted={obj.Encryption == "AES256"}&bucket={Uri.EscapeDataString(obj.BucketName)}&key={Uri.EscapeDataString(obj.ObjectKey)}&versionId={Uri.EscapeDataString(obj.VersionId)}",
+            content,
+            ct
+        );
+        response.EnsureSuccessStatusCode();
+    }
+
+    internal async Task CommitReplicaAsync(
+        string address,
+        Guid operation,
+        StorageObject obj,
+        CancellationToken ct
+    )
+    {
+        using var client = CreateClient();
+        using var body = JsonContent.Create(obj, StorageObjectJsonContext.Default.StorageObject);
+        using var response = await client.PostAsync(StageUrl(address, operation), body, ct);
+        response.EnsureSuccessStatusCode();
+    }
+
+    internal async Task DiscardReplicaStageAsync(string address, Guid operation)
+    {
+        using var client = CreateClient();
+        using var response = await client.DeleteAsync(StageUrl(address, operation));
+        response.EnsureSuccessStatusCode();
     }
 
     public async Task<(StorageObject Metadata, Stream Content)?> GetObjectAsync(
@@ -196,17 +234,20 @@ public class NodeClient(IHttpClientFactory httpClientFactory, IOptions<ClusterOp
     public async Task<Bucket?> CreateBucketAsync(
         string nodeAddress,
         string bucketName,
-        CancellationToken ct
+        bool objectLock,
+        CancellationToken ct,
+        bool coordinate = false
     )
     {
         using var client = CreateClient();
-        var body = new InternalCreateBucketRequest(bucketName);
+        var body = new InternalCreateBucketRequest(bucketName, objectLock);
         var content = JsonContent.Create(
             body,
             StorageObjectJsonContext.Default.InternalCreateBucketRequest
         );
-        var response = await client.PostAsync(
-            $"{nodeAddress.TrimEnd('/')}/_internal/buckets",
+        var route = coordinate ? "coordinator/buckets" : "buckets";
+        using var response = await client.PostAsync(
+            $"{nodeAddress.TrimEnd('/')}/_internal/{route}",
             content,
             ct
         );

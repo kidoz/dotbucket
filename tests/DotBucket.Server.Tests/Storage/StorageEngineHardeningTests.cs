@@ -21,10 +21,13 @@ public class StorageEngineHardeningTests : IDisposable
     );
     private readonly LocalFileSystemStorageEngine _storage;
 
+    private readonly IOptions<StorageOptions> _options;
+    private readonly NotificationDispatcher _dispatcher;
+
     public StorageEngineHardeningTests()
     {
         Directory.CreateDirectory(_rootPath);
-        var options = Options.Create(
+        _options = Options.Create(
             new StorageOptions
             {
                 RootPath = _rootPath,
@@ -33,13 +36,13 @@ public class StorageEngineHardeningTests : IDisposable
         );
         var httpClientFactory = Substitute.For<IHttpClientFactory>();
         httpClientFactory.CreateClient(Arg.Any<string>()).Returns(new HttpClient());
-        var dispatcher = new NotificationDispatcher(
+        _dispatcher = new NotificationDispatcher(
             httpClientFactory,
             Substitute.For<ILogger<NotificationDispatcher>>()
         );
         _storage = new LocalFileSystemStorageEngine(
-            options,
-            dispatcher,
+            _options,
+            _dispatcher,
             Substitute.For<ILogger<LocalFileSystemStorageEngine>>()
         );
     }
@@ -48,6 +51,90 @@ public class StorageEngineHardeningTests : IDisposable
         $"\"{Convert.ToHexString(MD5.HashData(data)).ToLowerInvariant()}\"";
 
     private CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    [Fact]
+    public async Task RestartPreservesLegacyAndNewObjectsWithTemporarySuffix()
+    {
+        await _storage.CreateBucketAsync("documents", false, Ct);
+        byte[] bytes = [1, 3, 5];
+        foreach (var key in new[] { "legacy.tmp", "current.tmp" })
+            await _storage.PutObjectAsync(
+                "documents",
+                key,
+                new MemoryStream(bytes),
+                "text/plain",
+                cancellationToken: Ct
+            );
+        // Model the on-disk layout from before the immutable-blob migration.
+        await File.WriteAllBytesAsync(
+            Path.Combine(_rootPath, "documents", "legacy.tmp"),
+            bytes,
+            Ct
+        );
+        using (
+            var db = new Microsoft.Data.Sqlite.SqliteConnection(
+                $"Data Source={Path.Combine(_rootPath, "metadata.db")}"
+            )
+        )
+        {
+            await db.OpenAsync(Ct);
+            using var command = db.CreateCommand();
+            command.CommandText =
+                "UPDATE objects SET blob_id = NULL WHERE object_key = 'legacy.tmp'";
+            await command.ExecuteNonQueryAsync(Ct);
+        }
+        var restarted = new LocalFileSystemStorageEngine(
+            _options,
+            _dispatcher,
+            Substitute.For<ILogger<LocalFileSystemStorageEngine>>()
+        );
+        foreach (var key in new[] { "legacy.tmp", "current.tmp" })
+        {
+            var result = await restarted.GetObjectAsync("documents", key, cancellationToken: Ct);
+            Assert.NotNull(result);
+            await using var content = result.Value.Content;
+            using var copy = new MemoryStream();
+            await content.CopyToAsync(copy, Ct);
+            Assert.Equal(bytes, copy.ToArray());
+        }
+    }
+
+    [Fact]
+    public async Task MultipartOperationsRequireTheStoredUploadIdentity()
+    {
+        const string bucket = "documents";
+        await _storage.CreateBucketAsync(bucket, false, Ct);
+        var upload = await _storage.InitiateMultipartUploadAsync(
+            bucket,
+            "original",
+            "text/plain",
+            cancellationToken: Ct
+        );
+        var tag = await _storage.UploadPartAsync(
+            bucket,
+            "original",
+            upload,
+            1,
+            new MemoryStream([1]),
+            Ct
+        );
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _storage.ListPartsAsync(bucket, "other", upload, Ct)
+        );
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _storage.UploadPartAsync(bucket, "other", upload, 1, new MemoryStream([2]), Ct)
+        );
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _storage.CompleteMultipartUploadAsync(bucket, "other", upload, [(1, tag)], Ct)
+        );
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _storage.AbortMultipartUploadAsync(bucket, "other", upload, Ct)
+        );
+        Assert.Equal(
+            tag,
+            Assert.Single(await _storage.ListPartsAsync(bucket, "original", upload, Ct)).ETag
+        );
+    }
 
     // ---- SSE-S3 (#1): plaintext Size/ETag + decryptable round-trip ----
 

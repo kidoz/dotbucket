@@ -12,12 +12,11 @@ namespace DotBucket.Server.Services;
 /// Periodically aborts in-progress multipart uploads older than the configured
 /// retention window. Closes the disk-leak vector where a client initiates
 /// uploads and never completes or aborts them: each abandoned upload holds a
-/// <c>multipart_uploads</c> row plus a <c>.uploads/{uploadId}/</c> parts
+/// <c>multipart_uploads</c> row plus a private parts
 /// directory whose files can be up to 5 GiB each, with no prior TTL.
 ///
 /// Aborts reuse <see cref="IStorageEngine.AbortMultipartUploadAsync"/>, which
-/// is idempotent (deletes the parts directory and both DB rows; no-op if the
-/// upload is already gone). Like <see cref="LifecycleExpirationService"/>,
+/// verifies the upload identity before deleting its parts and metadata. Like <see cref="LifecycleExpirationService"/>,
 /// this service is single-node only in v1: in cluster mode, multipart state is
 /// node-local and must be reaped per node.
 /// </summary>
@@ -92,10 +91,9 @@ public class MultipartUploadReaperService(
 
                 try
                 {
-                    // objectKey is unused by AbortMultipartUploadAsync; passing "" is safe.
                     await storageEngine.AbortMultipartUploadAsync(
                         bucket.Name,
-                        "",
+                        upload.ObjectKey,
                         upload.UploadId,
                         ct
                     );
@@ -109,7 +107,6 @@ public class MultipartUploadReaperService(
                 }
                 catch (Exception ex)
                 {
-                    // Abort is idempotent and should not throw for missing rows; log and continue.
                     logger.LogWarning(
                         ex,
                         "Failed to reap abandoned multipart upload {UploadId} in bucket {Bucket}; will retry next pass.",

@@ -3,15 +3,14 @@
 
 using System.Net;
 using AwesomeAssertions;
-using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace DotBucket.Server.IntegrationTests;
 
-public class BucketTests : IClassFixture<WebApplicationFactory<Program>>
+public class BucketTests : IClassFixture<IsolatedServerFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly IsolatedServerFactory _factory;
 
-    public BucketTests(WebApplicationFactory<Program> factory)
+    public BucketTests(IsolatedServerFactory factory)
     {
         _factory = factory;
     }

@@ -17,23 +17,18 @@ public static class InternalEndpoints
     {
         var group = app.MapGroup("/_internal").AddEndpointFilter<ClusterTokenFilter>();
 
-        // PUT /_internal/objects/{bucket}/{**key}
+        // PUT /_internal/coordinator/objects/{bucket}/{**key}
         group.MapPut(
-            "/objects/{bucket}/{**key}",
+            "/coordinator/objects/{bucket}/{**key}",
             async (
                 string bucket,
                 string key,
                 HttpRequest request,
-                LocalFileSystemStorageEngine storage,
+                DistributedStorageEngine storage,
                 CancellationToken ct
             ) =>
             {
                 var contentType = request.ContentType ?? "application/octet-stream";
-
-                // Extract replica version ID for consistent versioning across nodes
-                string? replicaVersionId = request
-                    .Headers["X-DotBucket-VersionId"]
-                    .FirstOrDefault();
 
                 // Extract encryption flag
                 string? encryption = request.Headers["X-DotBucket-Encryption"].FirstOrDefault();
@@ -55,17 +50,78 @@ public static class InternalEndpoints
                     }
                 }
 
-                var obj = await storage.PutObjectAsync(
+                var obj = await storage.PutOnPrimaryAsync(
                     bucket,
                     key,
                     request.Body,
                     contentType,
                     metadata,
                     encryption,
-                    ct,
-                    replicaVersionId
+                    ct
                 );
                 return Results.Ok(obj);
+            }
+        );
+
+        group.MapPut(
+            "/staged/{operation:guid}",
+            async (
+                Guid operation,
+                bool encrypted,
+                bool replay,
+                string bucket,
+                string key,
+                string versionId,
+                HttpRequest request,
+                LocalFileSystemStorageEngine storage,
+                CancellationToken ct
+            ) =>
+            {
+                var existing = await storage.GetBucketAsync(bucket, ct);
+                if (
+                    existing == null
+                    || (existing.Versioning == VersioningStatus.Enabled) != (versionId != "null")
+                )
+                    return Results.Conflict();
+                await storage.PrepareReplicaAsync(
+                    operation,
+                    bucket,
+                    key,
+                    versionId,
+                    request.Body,
+                    encrypted,
+                    replay,
+                    ct
+                );
+                return Results.NoContent();
+            }
+        );
+        group.MapPost(
+            "/staged/{operation:guid}",
+            async (
+                Guid operation,
+                StorageObject obj,
+                LocalFileSystemStorageEngine storage,
+                CancellationToken ct
+            ) =>
+            {
+                try
+                {
+                    await storage.CommitReplicaAsync(operation, obj, ct);
+                }
+                catch (FileNotFoundException)
+                {
+                    return Results.NotFound();
+                }
+                return Results.NoContent();
+            }
+        );
+        group.MapDelete(
+            "/staged/{operation:guid}",
+            async (Guid operation, LocalFileSystemStorageEngine storage, CancellationToken ct) =>
+            {
+                await storage.DiscardReplicaStageAsync(operation, ct);
+                return Results.NoContent();
             }
         );
 
@@ -141,6 +197,21 @@ public static class InternalEndpoints
             }
         );
 
+        group.MapPost(
+            "/coordinator/buckets",
+            async (
+                InternalCreateBucketRequest body,
+                ClusterState cluster,
+                DistributedStorageEngine storage,
+                CancellationToken ct
+            ) =>
+            {
+                if (!cluster.IsLeader)
+                    return Results.Conflict();
+                return Results.Ok(await storage.CreateBucketAsync(body.Name, body.ObjectLock, ct));
+            }
+        );
+
         // POST /_internal/buckets
         group.MapPost(
             "/buckets",
@@ -160,14 +231,16 @@ public static class InternalEndpoints
 
                 try
                 {
-                    var bucket = await storage.CreateBucketAsync(body.Name, false, ct);
+                    var bucket = await storage.CreateBucketAsync(body.Name, body.ObjectLock, ct);
                     return Results.Ok(bucket);
                 }
                 catch (InvalidOperationException)
                 {
                     // Bucket already exists — idempotent for cluster replication
                     var existing = await storage.GetBucketAsync(body.Name, ct);
-                    return Results.Ok(existing);
+                    return existing?.ObjectLock.Enabled == body.ObjectLock
+                        ? Results.Ok(existing)
+                        : Results.Conflict();
                 }
             }
         );

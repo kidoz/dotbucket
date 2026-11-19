@@ -1,7 +1,6 @@
 // Licensed under the MIT License.
 // See LICENSE file in the project root for full license information.
 
-using System.Collections.Concurrent;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -20,13 +19,22 @@ public class LocalFileSystemStorageEngine : IStorageEngine
     private readonly string _rootPath;
     private readonly string _dataRoot;
     private readonly string _dbPath;
+    private readonly string _stagingRoot;
+    private DateTime _nextStageCleanup;
     private readonly byte[] _masterKey;
     private readonly int _multipartBufferSize;
     private readonly long? _minFreeSpaceBytes;
     private readonly double? _minFreeSpacePercent;
     private readonly NotificationDispatcher _dispatcher;
     private readonly ILogger<LocalFileSystemStorageEngine> _logger;
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _writeLocks = new();
+    private readonly SemaphoreSlim[] _writeLocks = Enumerable
+        .Range(0, 256)
+        .Select(_ => new SemaphoreSlim(1, 1))
+        .ToArray();
+    private readonly SemaphoreSlim[] _publishLocks = Enumerable
+        .Range(0, 256)
+        .Select(_ => new SemaphoreSlim(1, 1))
+        .ToArray();
 
     public LocalFileSystemStorageEngine(
         IOptions<StorageOptions> options,
@@ -67,26 +75,12 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         if (!Directory.Exists(_dataRoot))
             Directory.CreateDirectory(_dataRoot);
 
+        _stagingRoot = Path.Combine(_dataRoot, "_internal", "staging");
+        Directory.CreateDirectory(_stagingRoot);
         _dbPath = Path.Combine(_rootPath, "metadata.db");
         _dispatcher = dispatcher;
         InitializeDatabase();
         ReconcileOnStartup();
-
-        // Background task to prune unused locks
-        _ = Task.Run(async () =>
-        {
-            while (true)
-            {
-                await Task.Delay(TimeSpan.FromMinutes(5));
-                foreach (var (key, semaphore) in _writeLocks)
-                {
-                    if (semaphore.CurrentCount == 1)
-                    {
-                        _writeLocks.TryRemove(key, out _);
-                    }
-                }
-            }
-        });
     }
 
     private SqliteConnection OpenConnection()
@@ -113,10 +107,13 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         return connection;
     }
 
+    private SemaphoreSlim GetPublishLock(string bucket, string key) =>
+        _publishLocks[(uint)HashCode.Combine(bucket, key) % _publishLocks.Length];
+
     private SemaphoreSlim GetWriteLock(string bucketName, string objectKey)
     {
         var lockKey = $"{bucketName}/{objectKey}";
-        return _writeLocks.GetOrAdd(lockKey, _ => new SemaphoreSlim(1, 1));
+        return _writeLocks[(uint)StringComparer.Ordinal.GetHashCode(lockKey) % _writeLocks.Length];
     }
 
     /// <summary>
@@ -326,18 +323,37 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             """
         );
 
+        RunMigration(connection, 7, "ALTER TABLE objects ADD COLUMN blob_id TEXT;");
+        RunMigration(
+            connection,
+            8,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_objects_blob_id ON objects(blob_id);
+            CREATE TABLE IF NOT EXISTS replica_preparations (
+                operation TEXT NOT NULL UNIQUE, bucket_name TEXT NOT NULL, object_key TEXT NOT NULL,
+                version_id TEXT NOT NULL, historical INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_prepared_key ON replica_preparations(bucket_name,object_key);
+            CREATE TABLE IF NOT EXISTS pending_replica_commits (
+                blob_id TEXT NOT NULL REFERENCES objects(blob_id) ON DELETE CASCADE,
+                node_id TEXT NOT NULL,
+                PRIMARY KEY (blob_id, node_id)
+            );
+            """
+        );
         CleanupOrphanedTempFiles();
     }
 
     private static void RunMigration(SqliteConnection connection, int version, string sql)
     {
+        using var transaction = connection.BeginTransaction();
         using var checkCmd = connection.CreateCommand();
+        checkCmd.Transaction = transaction;
         checkCmd.CommandText = "SELECT 1 FROM schema_migrations WHERE version = $v";
         checkCmd.Parameters.AddWithValue("$v", version);
         if (checkCmd.ExecuteScalar() != null)
             return;
 
-        using var transaction = connection.BeginTransaction();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = sql;
         cmd.Transaction = transaction;
@@ -360,9 +376,9 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         {
             foreach (
                 var tmpFile in Directory.EnumerateFiles(
-                    _rootPath,
+                    _stagingRoot,
                     "*.tmp",
-                    SearchOption.AllDirectories
+                    SearchOption.TopDirectoryOnly
                 )
             )
             {
@@ -423,7 +439,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             using var connection = OpenConnection();
             using var command = connection.CreateCommand();
             command.CommandText =
-                "SELECT bucket_name, object_key, version_id FROM objects WHERE is_delete_marker = 0";
+                "SELECT bucket_name, object_key, version_id, blob_id FROM objects WHERE is_delete_marker = 0";
             using var reader = command.ExecuteReader();
 
             var missing = 0;
@@ -436,7 +452,9 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                 string path;
                 try
                 {
-                    path = GetObjectPath(bucket, key, versionId);
+                    path = reader.IsDBNull(3)
+                        ? GetObjectPath(bucket, key, versionId)
+                        : BlobPath(reader.GetString(3));
                 }
                 catch
                 {
@@ -872,7 +890,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             replicaVersionId: null
         );
 
-    public async Task<StorageObject> PutObjectAsync(
+    public Task<StorageObject> PutObjectAsync(
         string bucketName,
         string objectKey,
         Stream content,
@@ -881,8 +899,32 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         string? encryption,
         CancellationToken cancellationToken,
         string? replicaVersionId
+    ) =>
+        PutObjectAsync(
+            bucketName,
+            objectKey,
+            content,
+            contentType,
+            metadata,
+            encryption,
+            cancellationToken,
+            replicaVersionId,
+            null
+        );
+
+    internal async Task<StorageObject> PutObjectAsync(
+        string bucketName,
+        string objectKey,
+        Stream content,
+        string contentType,
+        Dictionary<string, string>? metadata,
+        string? encryption,
+        CancellationToken cancellationToken,
+        string? replicaVersionId,
+        Func<StorageObject, string, CancellationToken, Task>? replicate
     )
     {
+        var tmpPath = NewStagingPath();
         var writeLock = GetWriteLock(bucketName, objectKey);
         await writeLock.WaitAsync(cancellationToken);
         try
@@ -896,15 +938,12 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                 versionId = replicaVersionId ?? Guid.NewGuid().ToString("N");
             }
 
-            var objectPath = GetObjectPath(bucketName, objectKey, versionId);
-            var objectDir = Path.GetDirectoryName(objectPath);
-            if (objectDir != null && !Directory.Exists(objectDir))
-                Directory.CreateDirectory(objectDir);
+            _ = GetObjectPath(bucketName, objectKey, versionId);
 
             // Size and ETag are always computed over the PLAINTEXT, even when the bytes are
             // encrypted at rest, so HEAD Content-Length and range handling stay correct.
-            var (size, eTag) = await WriteAtomicAsync(
-                objectPath,
+            var (size, eTag) = await WriteStagedAsync(
+                tmpPath,
                 content,
                 encryption == "AES256",
                 cancellationToken
@@ -940,25 +979,22 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                 LockStatus = lockStatus,
             };
 
-            await SaveMetadataAsync(storageObj, cancellationToken);
+            await PublishStagedAsync(storageObj, tmpPath, replicate, cancellationToken);
             await NotifyAsync(bucketName, "s3:ObjectCreated:Put", storageObj, cancellationToken);
             return storageObj;
         }
         finally
         {
             writeLock.Release();
+            File.Delete(tmpPath);
         }
     }
 
     /// <summary>
-    /// Streams <paramref name="content"/> (plaintext) into a temp file, optionally encrypting it
-    /// at rest with authenticated AES-256-GCM, then atomically publishes it via rename. The
-    /// returned Size and ETag are always computed over the PLAINTEXT. The bytes are flushed to
-    /// disk (fsync) before the rename, and the containing directory is fsync'd after, so a crash
-    /// cannot leave metadata pointing at non-durable bytes.
+    /// Durably stages bytes and computes the S3 size and ETag over the plaintext.
     /// </summary>
-    private async Task<(long Size, string ETag)> WriteAtomicAsync(
-        string finalPath,
+    private async Task<(long Size, string ETag)> WriteStagedAsync(
+        string tmpPath,
         Stream content,
         bool encrypt,
         CancellationToken cancellationToken
@@ -968,9 +1004,6 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         // we still check the static threshold in that case via anticipatedBytes=0.
         EnsureSpaceAvailable(content.CanSeek ? content.Length : 0);
 
-        var dir = Path.GetDirectoryName(finalPath) ?? ".";
-        var fileName = Path.GetFileName(finalPath);
-        var tmpPath = Path.Combine(dir, $".{fileName}.{Guid.NewGuid():N}.tmp");
         long size = 0;
         using var md5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
         try
@@ -978,7 +1011,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             await using (
                 var fileStream = new FileStream(
                     tmpPath,
-                    FileMode.Create,
+                    FileMode.CreateNew,
                     FileAccess.Write,
                     FileShare.None,
                     4096,
@@ -1022,8 +1055,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                 // Durably flush object bytes to disk before publishing via rename.
                 fileStream.Flush(flushToDisk: true);
             }
-            File.Move(tmpPath, finalPath, overwrite: true);
-            FsyncDirectory(dir);
+            FsyncDirectory(_stagingRoot);
         }
         catch (IOException ioex)
         {
@@ -1095,7 +1127,11 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         }
     }
 
-    private async Task SaveMetadataAsync(StorageObject obj, CancellationToken cancellationToken)
+    private async Task SaveMetadataAsync(
+        StorageObject obj,
+        CancellationToken cancellationToken,
+        IReadOnlyList<string>? pendingNodes = null
+    )
     {
         using var connection = await OpenConnectionAsync(cancellationToken);
         using var transaction = connection.BeginTransaction();
@@ -1106,10 +1142,25 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             "UPDATE objects SET is_latest = 0 WHERE bucket_name = $bucket AND object_key = $key";
         updateCmd.Parameters.AddWithValue("$bucket", obj.BucketName);
         updateCmd.Parameters.AddWithValue("$key", obj.ObjectKey);
-        await updateCmd.ExecuteNonQueryAsync(cancellationToken);
+        if (obj.IsLatest)
+            await updateCmd.ExecuteNonQueryAsync(cancellationToken);
 
+        string? supersededPath = null;
         if (obj.VersionId == "null")
         {
+            using var previous = connection.CreateCommand();
+            previous.Transaction = transaction;
+            previous.CommandText =
+                "SELECT blob_id FROM objects WHERE bucket_name = $bucket AND object_key = $key AND version_id = 'null' AND is_delete_marker = 0";
+            previous.Parameters.AddWithValue("$bucket", obj.BucketName);
+            previous.Parameters.AddWithValue("$key", obj.ObjectKey);
+            var oldBlob = await previous.ExecuteScalarAsync(cancellationToken);
+            supersededPath = oldBlob switch
+            {
+                string id => BlobPath(id),
+                DBNull => GetObjectPath(obj.BucketName, obj.ObjectKey, "null"),
+                _ => null,
+            };
             using var delCmd = connection.CreateCommand();
             delCmd.Transaction = transaction;
             delCmd.CommandText =
@@ -1122,8 +1173,8 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         using var insertCmd = connection.CreateCommand();
         insertCmd.Transaction = transaction;
         insertCmd.CommandText = """
-                INSERT INTO objects (bucket_name, object_key, version_id, is_latest, is_delete_marker, size, content_type, etag, last_modified, metadata_json, encryption, retention_mode, retain_until_date, legal_hold)
-                VALUES ($bucket, $key, $vid, $latest, $del, $size, $type, $etag, $mod, $meta, $enc, $rmode, $rdate, $hold)
+                INSERT INTO objects (bucket_name, object_key, version_id, is_latest, is_delete_marker, size, content_type, etag, last_modified, metadata_json, encryption, retention_mode, retain_until_date, legal_hold, blob_id)
+                VALUES ($bucket, $key, $vid, $latest, $del, $size, $type, $etag, $mod, $meta, $enc, $rmode, $rdate, $hold, $blob)
             """;
         insertCmd.Parameters.AddWithValue("$bucket", obj.BucketName);
         insertCmd.Parameters.AddWithValue("$key", obj.ObjectKey);
@@ -1150,10 +1201,54 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             "$rdate",
             (object?)obj.LockStatus.RetainUntilDate?.ToString("O") ?? DBNull.Value
         );
+        insertCmd.Parameters.AddWithValue("$blob", (object?)obj.BlobId ?? DBNull.Value);
         insertCmd.Parameters.AddWithValue("$hold", obj.LockStatus.LegalHold ? 1 : 0);
 
+        using var retire = connection.CreateCommand();
+        retire.Transaction = transaction;
+        retire.CommandText = """
+            UPDATE replica_preparations SET historical = 1 WHERE bucket_name = $bucket AND object_key = $key
+                AND rowid <= COALESCE((SELECT rowid FROM replica_preparations WHERE operation = $id), 9223372036854775807);
+            DELETE FROM replica_preparations WHERE bucket_name = $bucket AND object_key = $key
+                AND version_id = $vid AND historical = 1;
+            """;
+        retire.Parameters.AddWithValue("$bucket", obj.BucketName);
+        retire.Parameters.AddWithValue("$key", obj.ObjectKey);
+        retire.Parameters.AddWithValue("$vid", obj.VersionId);
+        retire.Parameters.AddWithValue("$id", (object?)obj.BlobId ?? DBNull.Value);
+        await retire.ExecuteNonQueryAsync(cancellationToken);
         await insertCmd.ExecuteNonQueryAsync(cancellationToken);
+        foreach (var nodeId in pendingNodes ?? [])
+        {
+            using var pending = connection.CreateCommand();
+            pending.Transaction = transaction;
+            pending.CommandText =
+                "INSERT INTO pending_replica_commits (blob_id,node_id) VALUES ($blob,$node)";
+            pending.Parameters.AddWithValue("$blob", obj.BlobId!);
+            pending.Parameters.AddWithValue("$node", nodeId);
+            await pending.ExecuteNonQueryAsync(cancellationToken);
+        }
+        if (obj.CompletedUploadId is string uploadId)
+        {
+            using var cleanup = connection.CreateCommand();
+            cleanup.Transaction = transaction;
+            cleanup.CommandText =
+                "DELETE FROM parts WHERE upload_id = $id; DELETE FROM multipart_uploads WHERE upload_id = $id;";
+            cleanup.Parameters.AddWithValue("$id", uploadId);
+            await cleanup.ExecuteNonQueryAsync(cancellationToken);
+        }
         await transaction.CommitAsync(cancellationToken);
+        if (supersededPath != null)
+        {
+            try
+            {
+                File.Delete(supersededPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _logger.LogWarning(ex, "Could not remove superseded object bytes");
+            }
+        }
     }
 
     public async Task<StorageObject?> HeadObjectAsync(
@@ -1189,24 +1284,38 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         CancellationToken cancellationToken = default
     )
     {
-        var metadata = await HeadObjectAsync(bucketName, objectKey, versionId, cancellationToken);
-        if (metadata == null)
-            return null;
-        var objectPath = GetObjectPath(bucketName, objectKey, metadata.VersionId);
-        if (!File.Exists(objectPath))
-            return null;
-        var fileStream = new FileStream(
-            objectPath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            4096,
-            useAsync: true
-        );
-        Stream finalStream = fileStream;
-        if (metadata.Encryption == "AES256")
-            finalStream = SseGcm.CreateDecryptingStream(fileStream, _masterKey);
-        return (metadata, finalStream);
+        var gate = GetPublishLock(bucketName, objectKey);
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            var metadata = await HeadObjectAsync(
+                bucketName,
+                objectKey,
+                versionId,
+                cancellationToken
+            );
+            if (metadata == null)
+                return null;
+            var objectPath = StoredPath(metadata);
+            if (!File.Exists(objectPath))
+                return null;
+            var fileStream = new FileStream(
+                objectPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read | FileShare.Delete,
+                4096,
+                useAsync: true
+            );
+            Stream finalStream = fileStream;
+            if (metadata.Encryption == "AES256")
+                finalStream = SseGcm.CreateDecryptingStream(fileStream, _masterKey);
+            return (metadata, finalStream);
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     public async Task<bool> DeleteObjectAsync(
@@ -1216,115 +1325,122 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         CancellationToken cancellationToken = default
     )
     {
-        var bucket = await GetBucketAsync(bucketName, cancellationToken)
-            ?? throw new InvalidOperationException($"Bucket '{bucketName}' does not exist.");
-        StorageObject? targetObj = null;
+        var gate = GetPublishLock(bucketName, objectKey);
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            var bucket = await GetBucketAsync(bucketName, cancellationToken)
+                ?? throw new InvalidOperationException($"Bucket '{bucketName}' does not exist.");
+            StorageObject? targetObj = null;
 
-        // Check object lock before deletion
-        var currentMeta = await HeadObjectAsync(
-            bucketName,
-            objectKey,
-            versionId,
-            cancellationToken
-        );
-        if (currentMeta != null)
-        {
-            if (currentMeta.LockStatus.LegalHold)
-                throw new InvalidOperationException("ObjectUnderLegalHold");
-            if (
-                currentMeta.LockStatus.RetentionMode != null
-                && currentMeta.LockStatus.RetainUntilDate > DateTime.UtcNow
-            )
-                throw new InvalidOperationException("ObjectUnderRetention");
-        }
-
-        if (versionId != null)
-        {
-            using var connection = await OpenConnectionAsync(cancellationToken);
-            using var transaction = connection.BeginTransaction();
-            using var findCmd = connection.CreateCommand();
-            findCmd.Transaction = transaction;
-            findCmd.CommandText =
-                "SELECT * FROM objects WHERE bucket_name = $bucket AND object_key = $key AND version_id = $vid";
-            findCmd.Parameters.AddWithValue("$bucket", bucketName);
-            findCmd.Parameters.AddWithValue("$key", objectKey);
-            findCmd.Parameters.AddWithValue("$vid", versionId);
-            using var r = await findCmd.ExecuteReaderAsync(cancellationToken);
-            if (await r.ReadAsync(cancellationToken))
-                targetObj = MapReaderToStorageObject(r);
-            await r.CloseAsync();
-            using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText =
-                "DELETE FROM objects WHERE bucket_name = $bucket AND object_key = $key AND version_id = $vid";
-            command.Parameters.AddWithValue("$bucket", bucketName);
-            command.Parameters.AddWithValue("$key", objectKey);
-            command.Parameters.AddWithValue("$vid", versionId);
-            await command.ExecuteNonQueryAsync(cancellationToken);
-            using var latestCmd = connection.CreateCommand();
-            latestCmd.Transaction = transaction;
-            latestCmd.CommandText =
-                "UPDATE objects SET is_latest = 1 WHERE rowid = (SELECT rowid FROM objects WHERE bucket_name = $bucket AND object_key = $key ORDER BY last_modified DESC LIMIT 1)";
-            latestCmd.Parameters.AddWithValue("$bucket", bucketName);
-            latestCmd.Parameters.AddWithValue("$key", objectKey);
-            await latestCmd.ExecuteNonQueryAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            var objectPath = GetObjectPath(bucketName, objectKey, versionId);
-            if (File.Exists(objectPath))
-                File.Delete(objectPath);
-        }
-        else if (bucket.Versioning == VersioningStatus.Enabled)
-        {
-            var deleteMarker = new StorageObject
-            {
-                BucketName = bucketName,
-                ObjectKey = objectKey,
-                VersionId = Guid.NewGuid().ToString("N"),
-                IsDeleteMarker = true,
-                Size = 0,
-                ContentType = "",
-                ETag = "",
-                LastModified = DateTime.UtcNow,
-            };
-            await SaveMetadataAsync(deleteMarker, cancellationToken);
-            targetObj = deleteMarker;
-        }
-        else
-        {
-            using var connection = await OpenConnectionAsync(cancellationToken);
-            using var transaction = connection.BeginTransaction();
-            using var findCmd = connection.CreateCommand();
-            findCmd.Transaction = transaction;
-            findCmd.CommandText =
-                "SELECT * FROM objects WHERE bucket_name = $bucket AND object_key = $key AND is_latest = 1";
-            findCmd.Parameters.AddWithValue("$bucket", bucketName);
-            findCmd.Parameters.AddWithValue("$key", objectKey);
-            using var r = await findCmd.ExecuteReaderAsync(cancellationToken);
-            if (await r.ReadAsync(cancellationToken))
-                targetObj = MapReaderToStorageObject(r);
-            await r.CloseAsync();
-            using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText =
-                "DELETE FROM objects WHERE bucket_name = $bucket AND object_key = $key AND version_id = 'null'";
-            command.Parameters.AddWithValue("$bucket", bucketName);
-            command.Parameters.AddWithValue("$key", objectKey);
-            await command.ExecuteNonQueryAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            var objectPath = GetObjectPath(bucketName, objectKey, "null");
-            if (File.Exists(objectPath))
-                File.Delete(objectPath);
-        }
-        if (targetObj != null)
-            await NotifyAsync(
+            // Check object lock before deletion
+            var currentMeta = await HeadObjectAsync(
                 bucketName,
-                targetObj.IsDeleteMarker
-                    ? "s3:ObjectRemoved:DeleteMarkerCreated"
-                    : "s3:ObjectRemoved:Delete",
-                targetObj,
+                objectKey,
+                versionId,
                 cancellationToken
             );
-        return true;
+            if (currentMeta != null)
+            {
+                if (currentMeta.LockStatus.LegalHold)
+                    throw new InvalidOperationException("ObjectUnderLegalHold");
+                if (
+                    currentMeta.LockStatus.RetentionMode != null
+                    && currentMeta.LockStatus.RetainUntilDate > DateTime.UtcNow
+                )
+                    throw new InvalidOperationException("ObjectUnderRetention");
+            }
+
+            if (versionId != null)
+            {
+                using var connection = await OpenConnectionAsync(cancellationToken);
+                using var transaction = connection.BeginTransaction();
+                using var findCmd = connection.CreateCommand();
+                findCmd.Transaction = transaction;
+                findCmd.CommandText =
+                    "SELECT * FROM objects WHERE bucket_name = $bucket AND object_key = $key AND version_id = $vid";
+                findCmd.Parameters.AddWithValue("$bucket", bucketName);
+                findCmd.Parameters.AddWithValue("$key", objectKey);
+                findCmd.Parameters.AddWithValue("$vid", versionId);
+                using var r = await findCmd.ExecuteReaderAsync(cancellationToken);
+                if (await r.ReadAsync(cancellationToken))
+                    targetObj = MapReaderToStorageObject(r);
+                await r.CloseAsync();
+                using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText =
+                    "DELETE FROM objects WHERE bucket_name = $bucket AND object_key = $key AND version_id = $vid; DELETE FROM replica_preparations WHERE bucket_name = $bucket AND object_key = $key AND version_id = $vid";
+                command.Parameters.AddWithValue("$bucket", bucketName);
+                command.Parameters.AddWithValue("$key", objectKey);
+                command.Parameters.AddWithValue("$vid", versionId);
+                await command.ExecuteNonQueryAsync(cancellationToken);
+                using var latestCmd = connection.CreateCommand();
+                latestCmd.Transaction = transaction;
+                latestCmd.CommandText =
+                    "UPDATE objects SET is_latest = 1 WHERE rowid = (SELECT rowid FROM objects WHERE bucket_name = $bucket AND object_key = $key ORDER BY last_modified DESC LIMIT 1)";
+                latestCmd.Parameters.AddWithValue("$bucket", bucketName);
+                latestCmd.Parameters.AddWithValue("$key", objectKey);
+                await latestCmd.ExecuteNonQueryAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                if (targetObj is { IsDeleteMarker: false })
+                    File.Delete(StoredPath(targetObj));
+            }
+            else if (bucket.Versioning == VersioningStatus.Enabled)
+            {
+                var deleteMarker = new StorageObject
+                {
+                    BucketName = bucketName,
+                    ObjectKey = objectKey,
+                    VersionId = Guid.NewGuid().ToString("N"),
+                    IsDeleteMarker = true,
+                    Size = 0,
+                    ContentType = "",
+                    ETag = "",
+                    LastModified = DateTime.UtcNow,
+                };
+                await SaveMetadataAsync(deleteMarker, cancellationToken);
+                targetObj = deleteMarker;
+            }
+            else
+            {
+                using var connection = await OpenConnectionAsync(cancellationToken);
+                using var transaction = connection.BeginTransaction();
+                using var findCmd = connection.CreateCommand();
+                findCmd.Transaction = transaction;
+                findCmd.CommandText =
+                    "SELECT * FROM objects WHERE bucket_name = $bucket AND object_key = $key AND version_id = 'null'";
+                findCmd.Parameters.AddWithValue("$bucket", bucketName);
+                findCmd.Parameters.AddWithValue("$key", objectKey);
+                using var r = await findCmd.ExecuteReaderAsync(cancellationToken);
+                if (await r.ReadAsync(cancellationToken))
+                    targetObj = MapReaderToStorageObject(r);
+                await r.CloseAsync();
+                using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText =
+                    "DELETE FROM objects WHERE bucket_name = $bucket AND object_key = $key AND version_id = 'null'; DELETE FROM replica_preparations WHERE bucket_name = $bucket AND object_key = $key AND version_id = 'null'";
+                command.Parameters.AddWithValue("$bucket", bucketName);
+                command.Parameters.AddWithValue("$key", objectKey);
+                await command.ExecuteNonQueryAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                if (targetObj is { IsDeleteMarker: false })
+                    File.Delete(StoredPath(targetObj));
+            }
+            if (targetObj != null)
+                await NotifyAsync(
+                    bucketName,
+                    targetObj.IsDeleteMarker
+                        ? "s3:ObjectRemoved:DeleteMarkerCreated"
+                        : "s3:ObjectRemoved:Delete",
+                    targetObj,
+                    cancellationToken
+                );
+            return true;
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     public async Task<IEnumerable<StorageObject>> ListObjectsAsync(
@@ -1498,7 +1614,8 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         await delLifecycleCmd.ExecuteNonQueryAsync(cancellationToken);
         using var delBucketCmd = connection.CreateCommand();
         delBucketCmd.Transaction = transaction;
-        delBucketCmd.CommandText = "DELETE FROM buckets WHERE name = $bucket";
+        delBucketCmd.CommandText =
+            "DELETE FROM replica_preparations WHERE bucket_name = $bucket; DELETE FROM buckets WHERE name = $bucket";
         delBucketCmd.Parameters.AddWithValue("$bucket", bucketName);
         await delBucketCmd.ExecuteNonQueryAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
@@ -1556,6 +1673,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
     {
         var parts = new List<PartInfo>();
         using var connection = await OpenConnectionAsync(cancellationToken);
+        await RequireUploadAsync(connection, bucketName, objectKey, uploadId, cancellationToken);
         using var command = connection.CreateCommand();
         command.CommandText =
             "SELECT part_number, etag, size FROM parts WHERE upload_id = $id ORDER BY part_number ASC";
@@ -1594,12 +1712,17 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             BucketName = reader.GetString(reader.GetOrdinal("bucket_name")),
             ObjectKey = reader.GetString(reader.GetOrdinal("object_key")),
             VersionId = reader.GetString(reader.GetOrdinal("version_id")),
+            BlobId = reader["blob_id"] as string,
             IsLatest = reader.GetInt32(reader.GetOrdinal("is_latest")) == 1,
             IsDeleteMarker = reader.GetInt32(reader.GetOrdinal("is_delete_marker")) == 1,
             Size = reader.GetInt64(reader.GetOrdinal("size")),
             ContentType = reader.GetString(reader.GetOrdinal("content_type")),
             ETag = reader.GetString(reader.GetOrdinal("etag")),
-            LastModified = DateTime.Parse(reader.GetString(reader.GetOrdinal("last_modified"))),
+            LastModified = DateTime.Parse(
+                reader.GetString(reader.GetOrdinal("last_modified")),
+                null,
+                DateTimeStyles.RoundtripKind
+            ),
             Metadata = metadata,
             Encryption = reader.IsDBNull(reader.GetOrdinal("encryption"))
                 ? null
@@ -1622,6 +1745,8 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         CancellationToken cancellationToken = default
     )
     {
+        if (!await BucketExistsAsync(bucketName, cancellationToken))
+            throw new InvalidOperationException("NoSuchBucket");
         var uploadId = Guid.NewGuid().ToString("N");
         using var connection = await OpenConnectionAsync(cancellationToken);
         using var command = connection.CreateCommand();
@@ -1640,10 +1765,17 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         );
         command.Parameters.AddWithValue("$created", DateTime.UtcNow.ToString("O"));
         command.Parameters.AddWithValue("$enc", (object?)encryption ?? DBNull.Value);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-        var partsDir = GetPartsPath(bucketName, uploadId);
-        if (!Directory.Exists(partsDir))
-            Directory.CreateDirectory(partsDir);
+        var partsDir = PrivatePartsPath(uploadId);
+        Directory.CreateDirectory(partsDir);
+        try
+        {
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch
+        {
+            Directory.Delete(partsDir);
+            throw;
+        }
         return uploadId;
     }
 
@@ -1659,84 +1791,72 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         if (partNumber < 1 || partNumber > 10000)
             throw new InvalidOperationException("InvalidPart");
 
-        EnsureSpaceAvailable(content.CanSeek ? content.Length : 0);
-
-        var partPath = Path.Combine(GetPartsPath(bucketName, uploadId), partNumber.ToString());
-        long size = 0;
-        // S3 part ETags are the hex-encoded MD5 of the part bytes; clients validate the
-        // ETag they receive here against the one they submit on CompleteMultipartUpload.
+        var writeLock = GetWriteLock(bucketName, objectKey);
+        await writeLock.WaitAsync(cancellationToken);
+        var tmpPath = NewStagingPath();
         try
         {
-            using (var md5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5))
-            using (
-                var fileStream = new FileStream(
-                    partPath,
-                    FileMode.Create,
-                    FileAccess.Write,
-                    FileShare.None,
-                    4096,
-                    useAsync: true
-                )
-            )
-            {
-                var buffer = new byte[_multipartBufferSize];
-                int read;
-                while (
-                    (read = await content.ReadAsync(buffer, 0, buffer.Length, cancellationToken))
-                    > 0
-                )
-                {
-                    await fileStream.WriteAsync(buffer, 0, read, cancellationToken);
-                    md5.AppendData(buffer, 0, read);
-                    size += read;
-                }
-                fileStream.Flush(flushToDisk: true);
-                var etag = $"\"{Convert.ToHexString(md5.GetHashAndReset()).ToLowerInvariant()}\"";
-                using var connection = await OpenConnectionAsync(cancellationToken);
-                using var command = connection.CreateCommand();
-                command.CommandText =
-                    "INSERT OR REPLACE INTO parts (upload_id, part_number, etag, size) VALUES ($id, $num, $etag, $size)";
-                command.Parameters.AddWithValue("$id", uploadId);
-                command.Parameters.AddWithValue("$num", partNumber);
-                command.Parameters.AddWithValue("$etag", etag);
-                command.Parameters.AddWithValue("$size", size);
-                await command.ExecuteNonQueryAsync(cancellationToken);
-                return etag;
-            }
+            using var connection = await OpenConnectionAsync(cancellationToken);
+            await RequireUploadAsync(
+                connection,
+                bucketName,
+                objectKey,
+                uploadId,
+                cancellationToken
+            );
+            var partPath = Path.Combine(GetPartsPath(bucketName, uploadId), partNumber.ToString());
+            var (size, etag) = await WriteStagedAsync(tmpPath, content, false, cancellationToken);
+            File.Move(tmpPath, partPath, overwrite: true);
+            FsyncDirectory(Path.GetDirectoryName(partPath));
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                "INSERT OR REPLACE INTO parts (upload_id, part_number, etag, size) VALUES ($id, $num, $etag, $size)";
+            command.Parameters.AddWithValue("$id", uploadId);
+            command.Parameters.AddWithValue("$num", partNumber);
+            command.Parameters.AddWithValue("$etag", etag);
+            command.Parameters.AddWithValue("$size", size);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            return etag;
         }
-        catch (IOException ioex)
+        finally
         {
-            if (File.Exists(partPath))
-            {
-                try
-                {
-                    File.Delete(partPath);
-                }
-                catch
-                {
-                    // Best-effort cleanup; the original failure is the actionable one.
-                }
-            }
-            throw ClassifyWriteFailure(ioex);
+            writeLock.Release();
+            File.Delete(tmpPath);
         }
     }
 
-    public async Task<StorageObject> CompleteMultipartUploadAsync(
+    public Task<StorageObject> CompleteMultipartUploadAsync(
         string bucketName,
         string objectKey,
         string uploadId,
         IEnumerable<(int PartNumber, string ETag)> parts,
         CancellationToken cancellationToken = default
+    ) =>
+        CompleteMultipartUploadAsync(
+            bucketName,
+            objectKey,
+            uploadId,
+            parts,
+            cancellationToken,
+            null
+        );
+
+    internal async Task<StorageObject> CompleteMultipartUploadAsync(
+        string bucketName,
+        string objectKey,
+        string uploadId,
+        IEnumerable<(int PartNumber, string ETag)> parts,
+        CancellationToken cancellationToken,
+        Func<StorageObject, string, CancellationToken, Task>? replicate
     )
     {
+        var tmpPath = NewStagingPath();
         var writeLock = GetWriteLock(bucketName, objectKey);
         await writeLock.WaitAsync(cancellationToken);
         try
         {
             using var connection = await OpenConnectionAsync(cancellationToken);
-            using var uploadCmd = connection.CreateCommand();
-            uploadCmd.CommandText = "SELECT * FROM multipart_uploads WHERE upload_id = $id";
-            uploadCmd.Parameters.AddWithValue("$id", uploadId);
+            using var uploadCmd = UploadLookup(connection, bucketName, objectKey, uploadId);
             using var uploadReader = await uploadCmd.ExecuteReaderAsync(cancellationToken);
             if (!await uploadReader.ReadAsync(cancellationToken))
                 throw new InvalidOperationException("NoSuchUpload");
@@ -1756,10 +1876,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                 bucket.Versioning == VersioningStatus.Enabled
                     ? Guid.NewGuid().ToString("N")
                     : "null";
-            var finalPath = GetObjectPath(bucketName, objectKey, versionId);
-            var finalDir = Path.GetDirectoryName(finalPath);
-            if (finalDir != null && !Directory.Exists(finalDir))
-                Directory.CreateDirectory(finalDir);
+            _ = GetObjectPath(bucketName, objectKey, versionId);
             var partsDir = GetPartsPath(bucketName, uploadId);
             long totalSize = 0;
 
@@ -1812,7 +1929,6 @@ public class LocalFileSystemStorageEngine : IStorageEngine
             var totalPartBytes = partsList.Sum(p => storedParts[p.PartNumber].Size);
             EnsureSpaceAvailable(totalPartBytes);
 
-            var tmpPath = finalPath + $".{Guid.NewGuid():N}.tmp";
             using var md5Concat = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
             try
             {
@@ -1876,8 +1992,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                     // Durably flush the assembled object to disk before publishing it via rename.
                     finalFileStream.Flush(flushToDisk: true);
                 }
-                File.Move(tmpPath, finalPath, overwrite: true);
-                FsyncDirectory(finalDir);
+                FsyncDirectory(_stagingRoot);
             }
             catch (IOException ioex)
             {
@@ -1925,6 +2040,7 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                 ObjectKey = objectKey,
                 VersionId = versionId,
                 Size = totalSize,
+                CompletedUploadId = uploadId,
                 ContentType = contentType,
                 ETag = eTag,
                 LastModified = DateTime.UtcNow,
@@ -1932,24 +2048,39 @@ public class LocalFileSystemStorageEngine : IStorageEngine
                 Encryption = encryption,
                 LockStatus = lockStatus,
             };
-            await SaveMetadataAsync(storageObj, cancellationToken);
+            try
+            {
+                await PublishStagedAsync(storageObj, tmpPath, replicate, cancellationToken);
+            }
+            finally
+            {
+                // A decided write can still be waiting for replica confirmations. Remove
+                // parts only after the local publication transaction consumed this upload.
+                using var lookup = UploadLookup(connection, bucketName, objectKey, uploadId);
+                if (
+                    await lookup.ExecuteScalarAsync(CancellationToken.None) == null
+                    && Directory.Exists(partsDir)
+                )
+                    await RemoveUploadFilesAsync(
+                        bucketName,
+                        uploadId,
+                        partsDir,
+                        storedParts.Keys,
+                        CancellationToken.None
+                    );
+            }
             await NotifyAsync(
                 bucketName,
                 "s3:ObjectCreated:CompleteMultipartUpload",
                 storageObj,
                 cancellationToken
             );
-            Directory.Delete(partsDir, true);
-            using var cleanupCmd = connection.CreateCommand();
-            cleanupCmd.CommandText =
-                "DELETE FROM multipart_uploads WHERE upload_id = $id; DELETE FROM parts WHERE upload_id = $id;";
-            cleanupCmd.Parameters.AddWithValue("$id", uploadId);
-            await cleanupCmd.ExecuteNonQueryAsync(cancellationToken);
             return storageObj;
         }
         finally
         {
             writeLock.Release();
+            File.Delete(tmpPath);
         }
     }
 
@@ -1960,19 +2091,315 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         CancellationToken cancellationToken = default
     )
     {
-        var partsDir = GetPartsPath(bucketName, uploadId);
-        if (Directory.Exists(partsDir))
-            Directory.Delete(partsDir, true);
-        using var connection = await OpenConnectionAsync(cancellationToken);
+        var writeLock = GetWriteLock(bucketName, objectKey);
+        await writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            using var connection = await OpenConnectionAsync(cancellationToken);
+            await RequireUploadAsync(
+                connection,
+                bucketName,
+                objectKey,
+                uploadId,
+                cancellationToken
+            );
+            var partsDir = GetPartsPath(bucketName, uploadId);
+            var parts = await ListPartsAsync(bucketName, objectKey, uploadId, cancellationToken);
+            await RemoveUploadFilesAsync(
+                bucketName,
+                uploadId,
+                partsDir,
+                parts.Select(p => p.PartNumber),
+                cancellationToken
+            );
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                "DELETE FROM multipart_uploads WHERE upload_id = $id; DELETE FROM parts WHERE upload_id = $id;";
+            command.Parameters.AddWithValue("$id", uploadId);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        finally
+        {
+            writeLock.Release();
+        }
+    }
+
+    private async Task RemoveUploadFilesAsync(
+        string bucket,
+        string uploadId,
+        string directory,
+        IEnumerable<int> partNumbers,
+        CancellationToken ct
+    )
+    {
+        if (!Directory.Exists(directory))
+            return;
+        if (directory == PrivatePartsPath(uploadId))
+        {
+            Directory.Delete(directory, true);
+            return;
+        }
+        // The legacy staging directory shared a namespace with ordinary S3 keys.
+        // Only reclaim known part files which have no committed object at that path.
+        foreach (var number in partNumbers)
+        {
+            var name = number.ToString(CultureInfo.InvariantCulture);
+            var key = $".uploads/{uploadId}/{name}";
+            if (await HeadObjectAsync(bucket, key, "null", ct) == null)
+                File.Delete(Path.Combine(directory, name));
+        }
+        if (!Directory.EnumerateFileSystemEntries(directory).Any())
+            Directory.Delete(directory);
+    }
+
+    private static SqliteCommand UploadLookup(
+        SqliteConnection connection,
+        string bucket,
+        string key,
+        string uploadId
+    )
+    {
+        if (!Guid.TryParseExact(uploadId, "N", out _))
+            throw new InvalidOperationException("NoSuchUpload");
+        var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT * FROM multipart_uploads WHERE upload_id = $id AND bucket_name = $bucket AND object_key = $key";
+        command.Parameters.AddWithValue("$id", uploadId);
+        command.Parameters.AddWithValue("$bucket", bucket);
+        command.Parameters.AddWithValue("$key", key);
+        return command;
+    }
+
+    private static async Task RequireUploadAsync(
+        SqliteConnection connection,
+        string bucket,
+        string key,
+        string uploadId,
+        CancellationToken ct
+    )
+    {
+        using var lookup = UploadLookup(connection, bucket, key, uploadId);
+        if (await lookup.ExecuteScalarAsync(ct) == null)
+            throw new InvalidOperationException("NoSuchUpload");
+    }
+
+    private string ReplicaStagePath(Guid operation) =>
+        Path.Combine(_stagingRoot, $"{operation:N}.ready");
+
+    internal async Task PrepareReplicaAsync(
+        Guid operation,
+        string bucket,
+        string key,
+        string versionId,
+        Stream body,
+        bool encrypted,
+        bool replay,
+        CancellationToken ct
+    )
+    {
+        var tmpPath = NewStagingPath();
+        try
+        {
+            await WriteStagedAsync(tmpPath, body, encrypted, ct);
+            var gate = GetPublishLock(bucket, key);
+            await gate.WaitAsync(ct);
+            try
+            {
+                using var db = await OpenConnectionAsync(ct);
+                using var record = db.CreateCommand();
+                record.CommandText = replay
+                    ? "SELECT 1 FROM replica_preparations WHERE operation = $id AND bucket_name = $bucket AND object_key = $key AND version_id = $vid"
+                    : "INSERT OR IGNORE INTO replica_preparations(operation,bucket_name,object_key,version_id) VALUES($id,$bucket,$key,$vid)";
+                record.Parameters.AddWithValue("$id", operation.ToString("N"));
+                record.Parameters.AddWithValue("$bucket", bucket);
+                record.Parameters.AddWithValue("$key", key);
+                record.Parameters.AddWithValue("$vid", versionId);
+                if (replay && await record.ExecuteScalarAsync(ct) == null)
+                    return;
+                File.Move(tmpPath, ReplicaStagePath(operation), overwrite: true);
+                FsyncDirectory(_stagingRoot);
+                if (!replay)
+                    await record.ExecuteNonQueryAsync(ct);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+        finally
+        {
+            File.Delete(tmpPath);
+        }
+    }
+
+    internal async Task CommitReplicaAsync(Guid operation, StorageObject obj, CancellationToken ct)
+    {
+        var gate = GetPublishLock(obj.BucketName, obj.ObjectKey);
+        await gate.WaitAsync(ct);
+        try
+        {
+            var blobId = operation.ToString("N");
+            var existing = await HeadObjectAsync(obj.BucketName, obj.ObjectKey, obj.VersionId, ct);
+            if (existing?.BlobId == blobId)
+                return;
+
+            using var db = await OpenConnectionAsync(ct);
+            using var lookup = db.CreateCommand();
+            lookup.CommandText =
+                "SELECT historical FROM replica_preparations WHERE operation = $id AND bucket_name = $bucket AND object_key = $key AND version_id = $vid";
+            lookup.Parameters.AddWithValue("$id", blobId);
+            lookup.Parameters.AddWithValue("$bucket", obj.BucketName);
+            lookup.Parameters.AddWithValue("$key", obj.ObjectKey);
+            lookup.Parameters.AddWithValue("$vid", obj.VersionId);
+            var historical = await lookup.ExecuteScalarAsync(ct);
+            if (historical == null)
+            {
+                // Already consumed or superseded by a later write/delete on this node.
+                File.Delete(ReplicaStagePath(operation));
+                return;
+            }
+            if ((long)historical != 0)
+                obj = obj with { IsLatest = false };
+            await PublishBlobAsync(obj, ReplicaStagePath(operation), blobId, null);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    internal async Task<List<(StorageObject Object, string NodeId)>> PendingReplicaCommitsAsync(
+        CancellationToken ct
+    )
+    {
+        using var connection = await OpenConnectionAsync(ct);
+        using var query = connection.CreateCommand();
+        query.CommandText =
+            "SELECT o.*, p.node_id FROM pending_replica_commits p JOIN objects o USING(blob_id) ORDER BY o.last_modified";
+        using var reader = await query.ExecuteReaderAsync(ct);
+        var pending = new List<(StorageObject, string)>();
+        while (await reader.ReadAsync(ct))
+            pending.Add(
+                (MapReaderToStorageObject(reader), reader.GetString(reader.GetOrdinal("node_id")))
+            );
+        return pending;
+    }
+
+    internal async Task ConfirmReplicaAsync(Guid operation, string node, CancellationToken ct)
+    {
+        using var connection = await OpenConnectionAsync(ct);
         using var command = connection.CreateCommand();
         command.CommandText =
-            "DELETE FROM multipart_uploads WHERE upload_id = $id; DELETE FROM parts WHERE upload_id = $id;";
-        command.Parameters.AddWithValue("$id", uploadId);
-        await command.ExecuteNonQueryAsync(cancellationToken);
+            "DELETE FROM pending_replica_commits WHERE blob_id = $id AND node_id = $node";
+        command.Parameters.AddWithValue("$id", operation.ToString("N"));
+        command.Parameters.AddWithValue("$node", node);
+        await command.ExecuteNonQueryAsync(ct);
     }
+
+    internal async Task DiscardReplicaStageAsync(Guid operation, CancellationToken ct)
+    {
+        using var db = await OpenConnectionAsync(ct);
+        using var command = db.CreateCommand();
+        command.CommandText = "DELETE FROM replica_preparations WHERE operation = $operation";
+        command.Parameters.AddWithValue("$operation", operation.ToString("N"));
+        await command.ExecuteNonQueryAsync(ct);
+        File.Delete(ReplicaStagePath(operation));
+    }
+
+    internal Stream OpenCommittedBlob(Guid operation, bool encrypted) =>
+        OpenStagedContent(BlobPath(operation.ToString("N")), encrypted);
+
+    internal void ReapAbandonedReplicaStages()
+    {
+        var now = DateTime.UtcNow;
+        if (now < _nextStageCleanup)
+            return;
+        _nextStageCleanup = now.AddHours(1);
+        foreach (var file in Directory.EnumerateFiles(_stagingRoot, "*.ready"))
+            if (File.GetLastWriteTimeUtc(file) < now.AddDays(-1))
+                File.Delete(file);
+    }
+
+    private string NewStagingPath() => Path.Combine(_stagingRoot, $"{Guid.NewGuid():N}.tmp");
+
+    internal Stream OpenStagedContent(string path, bool encrypted)
+    {
+        var stream = File.OpenRead(path);
+        return encrypted ? SseGcm.CreateDecryptingStream(stream, _masterKey) : stream;
+    }
+
+    private async Task PublishStagedAsync(
+        StorageObject obj,
+        string stagedPath,
+        Func<StorageObject, string, CancellationToken, Task>? replicate,
+        CancellationToken ct
+    )
+    {
+        if (replicate != null)
+        {
+            await replicate(obj, stagedPath, ct);
+            return;
+        }
+        await CommitLocalAsync(obj, stagedPath, Guid.NewGuid(), null, ct);
+    }
+
+    internal async Task CommitLocalAsync(
+        StorageObject obj,
+        string stagedPath,
+        Guid operation,
+        IReadOnlyList<string>? pendingNodes,
+        CancellationToken ct
+    )
+    {
+        var gate = GetPublishLock(obj.BucketName, obj.ObjectKey);
+        await gate.WaitAsync(ct);
+        try
+        {
+            await PublishBlobAsync(obj, stagedPath, operation.ToString("N"), pendingNodes);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task PublishBlobAsync(
+        StorageObject obj,
+        string stagedPath,
+        string blobId,
+        IReadOnlyList<string>? pendingNodes
+    )
+    {
+        var path = BlobPath(blobId);
+        var directory = Path.GetDirectoryName(path)!;
+        Directory.CreateDirectory(directory);
+        // A replay after a crash between the rename and SQLite commit reuses the durable blob.
+        if (!File.Exists(path))
+        {
+            File.Move(stagedPath, path);
+            FsyncDirectory(directory);
+        }
+        await SaveMetadataAsync(obj with { BlobId = blobId }, CancellationToken.None, pendingNodes);
+    }
+
+    private string BlobPath(string id) =>
+        Path.Combine(_dataRoot, "_internal", "blobs", id[..2], id);
+
+    private string StoredPath(StorageObject obj) =>
+        obj.BlobId is string id
+            ? BlobPath(id)
+            : GetObjectPath(obj.BucketName, obj.ObjectKey, obj.VersionId);
 
     private string GetBucketPath(string bucketName)
     {
+        if (
+            string.IsNullOrEmpty(bucketName)
+            || bucketName is "." or ".."
+            || bucketName.Equals("_internal", StringComparison.OrdinalIgnoreCase)
+            || bucketName.IndexOfAny(['/', (char)92]) >= 0
+            || Path.IsPathRooted(bucketName)
+        )
+            throw new InvalidOperationException("InvalidBucketName");
         var path = Path.GetFullPath(Path.Combine(_dataRoot, bucketName));
         EnsureWithinRoot(path);
         return path;
@@ -1983,14 +2410,28 @@ public class LocalFileSystemStorageEngine : IStorageEngine
         var safeKey = objectKey.Replace('/', Path.DirectorySeparatorChar);
         if (versionId != "null")
             safeKey += "." + versionId;
-        var path = Path.GetFullPath(Path.Combine(_dataRoot, bucketName, safeKey));
-        EnsureWithinRoot(path);
+        var bucketPath = GetBucketPath(bucketName);
+        var path = Path.GetFullPath(Path.Combine(bucketPath, safeKey));
+        if (
+            !path.StartsWith(bucketPath + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+            || objectKey.Split('/', (char)92).Any(segment => segment is "." or "..")
+        )
+            throw new InvalidOperationException("InvalidRequest");
         return path;
     }
 
+    private string PrivatePartsPath(string uploadId) =>
+        Path.Combine(_dataRoot, "_internal", "uploads", uploadId);
+
     private string GetPartsPath(string bucketName, string uploadId)
     {
-        var path = Path.GetFullPath(Path.Combine(_dataRoot, bucketName, ".uploads", uploadId));
+        if (!Guid.TryParseExact(uploadId, "N", out _))
+            throw new InvalidOperationException("NoSuchUpload");
+        var current = PrivatePartsPath(uploadId);
+        if (Directory.Exists(current))
+            return current;
+        // Uploads initiated on older servers keep their original directory until completion.
+        var path = Path.GetFullPath(Path.Combine(GetBucketPath(bucketName), ".uploads", uploadId));
         EnsureWithinRoot(path);
         return path;
     }

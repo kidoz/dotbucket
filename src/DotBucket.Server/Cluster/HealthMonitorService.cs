@@ -2,6 +2,7 @@
 // See LICENSE file in the project root for full license information.
 
 using DotBucket.Server.Configuration;
+using DotBucket.Server.Storage;
 using Microsoft.Extensions.Options;
 
 namespace DotBucket.Server.Cluster;
@@ -9,6 +10,7 @@ namespace DotBucket.Server.Cluster;
 public class HealthMonitorService(
     ClusterState cluster,
     NodeClient nodeClient,
+    DistributedStorageEngine storage,
     IOptions<ClusterOptions> options,
     ILogger<HealthMonitorService> logger
 ) : BackgroundService
@@ -36,6 +38,14 @@ public class HealthMonitorService(
             var peers = cluster.AllNodes.Where(n => !n.IsSelf).ToList();
             var tasks = peers.Select(peer => ProbeNodeAsync(peer, stoppingToken));
             await Task.WhenAll(tasks);
+            try
+            {
+                await storage.RetryPendingCommitsAsync(stoppingToken);
+            }
+            catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "Could not recover pending replica commits on this pass");
+            }
         }
     }
 

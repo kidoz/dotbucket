@@ -17,6 +17,8 @@ public record StorageObject
 
     // Versioning support
     public string VersionId { get; init; } = "null";
+    internal string? BlobId { get; init; }
+    internal string? CompletedUploadId { get; init; }
     public bool IsLatest { get; init; } = true;
     public bool IsDeleteMarker { get; init; } = false;
     public string? Encryption { get; init; }

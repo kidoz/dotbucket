@@ -105,7 +105,10 @@ if (clusterConfig?.Enabled == true)
     builder.Services.AddSingleton<DataPlacement>();
     builder.Services.AddSingleton<NodeClient>();
     builder.Services.AddHostedService<HealthMonitorService>();
-    builder.Services.AddSingleton<IStorageEngine, DistributedStorageEngine>();
+    builder.Services.AddSingleton<DistributedStorageEngine>();
+    builder.Services.AddSingleton<IStorageEngine>(sp =>
+        sp.GetRequiredService<DistributedStorageEngine>()
+    );
 
     // Inter-node HTTP client. When a trusted CA bundle is configured, validate peer
     // certificates against that custom root (for private/enterprise CAs); otherwise

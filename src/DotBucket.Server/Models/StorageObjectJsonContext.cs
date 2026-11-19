@@ -8,7 +8,7 @@ using DotBucket.Server.Iam;
 
 namespace DotBucket.Server.Models;
 
-public record InternalCreateBucketRequest(string Name);
+public record InternalCreateBucketRequest(string Name, bool ObjectLock = false);
 
 public record InternalSetVersioningRequest(string Status);
 

@@ -4,8 +4,15 @@ import type { IamUser, IamPolicy, IamGroup } from '../types/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { User, Key, ShieldCheck, Users, Plus, Trash2 } from 'lucide-react';
 
 export function IamView() {
@@ -23,7 +30,7 @@ export function IamView() {
       const [u, p, g] = await Promise.all([
         apiClient.getUsers(),
         apiClient.getPolicies(),
-        apiClient.getGroups()
+        apiClient.getGroups(),
       ]);
       setUsers(u);
       setPolicies(p);
@@ -75,10 +82,22 @@ PLEASE SAVE THIS NOW. IT WILL NEVER BE SHOWN AGAIN.`);
 
       <Tabs defaultValue="users" className="w-full">
         <TabsList className="grid w-full grid-cols-4 lg:w-[400px]">
-          <TabsTrigger value="users"><User className="h-4 w-4 mr-2" />Users</TabsTrigger>
-          <TabsTrigger value="groups"><Users className="h-4 w-4 mr-2" />Groups</TabsTrigger>
-          <TabsTrigger value="policies"><ShieldCheck className="h-4 w-4 mr-2" />Policies</TabsTrigger>
-          <TabsTrigger value="keys"><Key className="h-4 w-4 mr-2" />Keys</TabsTrigger>
+          <TabsTrigger value="users">
+            <User className="mr-2 h-4 w-4" />
+            Users
+          </TabsTrigger>
+          <TabsTrigger value="groups">
+            <Users className="mr-2 h-4 w-4" />
+            Groups
+          </TabsTrigger>
+          <TabsTrigger value="policies">
+            <ShieldCheck className="mr-2 h-4 w-4" />
+            Policies
+          </TabsTrigger>
+          <TabsTrigger value="keys">
+            <Key className="mr-2 h-4 w-4" />
+            Keys
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="users" className="space-y-4 pt-4">
@@ -88,13 +107,16 @@ PLEASE SAVE THIS NOW. IT WILL NEVER BE SHOWN AGAIN.`);
               <CardDescription>Manage administrative and application users.</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="flex space-x-2 mb-4">
-                <Input 
-                  placeholder="New user name" 
+              <div className="mb-4 flex space-x-2">
+                <Input
+                  placeholder="New user name"
                   value={newUserName}
                   onChange={(e) => setNewUserName(e.target.value)}
                 />
-                <Button onClick={handleCreateUser}><Plus className="h-4 w-4 mr-2" />Add User</Button>
+                <Button onClick={handleCreateUser}>
+                  <Plus className="mr-2 h-4 w-4" />
+                  Add User
+                </Button>
               </div>
               <Table>
                 <TableHeader>
@@ -106,20 +128,31 @@ PLEASE SAVE THIS NOW. IT WILL NEVER BE SHOWN AGAIN.`);
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {users.map(user => (
+                  {users.map((user) => (
                     <TableRow key={user.userName}>
                       <TableCell className="font-medium">{user.userName}</TableCell>
                       <TableCell>
-                        <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs">
+                        <span className="rounded bg-green-100 px-2 py-0.5 text-xs text-green-700">
                           {user.status}
                         </span>
                       </TableCell>
                       <TableCell className="text-sm text-slate-500">
                         {new Date(user.createdAt).toLocaleDateString()}
                       </TableCell>
-                      <TableCell className="text-right space-x-2">
-                        <Button variant="outline" size="sm" onClick={() => handleCreateAccessKey(user.userName)}>Generate Key</Button>
-                        <Button variant="ghost" size="icon" onClick={() => handleDeleteUser(user.userName)} className="text-red-500">
+                      <TableCell className="space-x-2 text-right">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleCreateAccessKey(user.userName)}
+                        >
+                          Generate Key
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => handleDeleteUser(user.userName)}
+                          className="text-red-500"
+                        >
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </TableCell>
@@ -135,7 +168,9 @@ PLEASE SAVE THIS NOW. IT WILL NEVER BE SHOWN AGAIN.`);
           <Card>
             <CardHeader>
               <CardTitle>Groups</CardTitle>
-              <CardDescription>Organize users into groups for easier permission management.</CardDescription>
+              <CardDescription>
+                Organize users into groups for easier permission management.
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <Table>
@@ -147,7 +182,7 @@ PLEASE SAVE THIS NOW. IT WILL NEVER BE SHOWN AGAIN.`);
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {groups.map(group => (
+                  {groups.map((group) => (
                     <TableRow key={group.groupName}>
                       <TableCell className="font-medium">{group.groupName}</TableCell>
                       <TableCell>{group.status}</TableCell>
@@ -176,14 +211,18 @@ PLEASE SAVE THIS NOW. IT WILL NEVER BE SHOWN AGAIN.`);
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {policies.map(policy => (
+                  {policies.map((policy) => (
                     <TableRow key={policy.policyName}>
                       <TableCell className="font-medium">{policy.policyName}</TableCell>
                       <TableCell>
                         {policy.isBuiltin ? (
-                          <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-xs">Built-in</span>
+                          <span className="rounded bg-blue-100 px-2 py-0.5 text-xs text-blue-700">
+                            Built-in
+                          </span>
                         ) : (
-                          <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-xs">Custom</span>
+                          <span className="rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-700">
+                            Custom
+                          </span>
                         )}
                       </TableCell>
                       <TableCell className="text-sm text-slate-500">
@@ -204,7 +243,7 @@ PLEASE SAVE THIS NOW. IT WILL NEVER BE SHOWN AGAIN.`);
               <CardDescription>Security credentials for standard S3 clients.</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="text-sm text-slate-500 italic mb-4">
+              <div className="mb-4 text-sm italic text-slate-500">
                 Note: Access keys are listed under individual users in the Users tab.
               </div>
             </CardContent>
